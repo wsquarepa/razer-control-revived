@@ -3,7 +3,8 @@ use libadwaita as adw;
 use gtk::prelude::*;
 use adw::prelude::*;
 use std::rc::Rc;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use crate::comms::FanCurvePoint;
 
 pub struct SettingsPage {
     pub page: adw::PreferencesPage,
@@ -192,5 +193,246 @@ pub fn profile_description(index: u32) -> &'static str {
         3 => "Minimal noise, reduced performance",
         4 => "Manually tune CPU and GPU levels",
         _ => "",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Smart fan-curve editor (custom DrawingArea widget)
+// ---------------------------------------------------------------------------
+
+const CURVE_LEFT: f64 = 44.0;
+const CURVE_RIGHT: f64 = 12.0;
+const CURVE_TOP: f64 = 12.0;
+const CURVE_BOTTOM: f64 = 24.0;
+const CURVE_HANDLE_RADIUS: f64 = 5.0;
+const CURVE_HIT_RADIUS: f64 = 16.0;
+
+fn temp_to_x(temp: f64, w: f64) -> f64 {
+    CURVE_LEFT + (temp / 100.0) * (w - CURVE_LEFT - CURVE_RIGHT)
+}
+
+fn rpm_to_y(rpm: f64, h: f64, min: f64, max: f64) -> f64 {
+    let span = (max - min).max(1.0);
+    CURVE_TOP + (1.0 - (rpm - min) / span) * (h - CURVE_TOP - CURVE_BOTTOM)
+}
+
+fn x_to_temp(x: f64, w: f64) -> f64 {
+    (((x - CURVE_LEFT) / (w - CURVE_LEFT - CURVE_RIGHT)) * 100.0).clamp(0.0, 100.0)
+}
+
+fn y_to_rpm(y: f64, h: f64, min: f64, max: f64) -> f64 {
+    let span = (max - min).max(1.0);
+    (min + (1.0 - (y - CURVE_TOP) / (h - CURVE_TOP - CURVE_BOTTOM)) * span).clamp(min, max)
+}
+
+fn nearest_curve_point(pts: &[FanCurvePoint], x: f64, y: f64, w: f64, h: f64, min: f64, max: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, p) in pts.iter().enumerate() {
+        let px = temp_to_x(f64::from(p.temp_c), w);
+        let py = rpm_to_y(f64::from(p.rpm), h, min, max);
+        let dist = ((px - x).powi(2) + (py - y).powi(2)).sqrt();
+        if dist <= CURVE_HIT_RADIUS && best.map_or(true, |(_, bd)| dist < bd) {
+            best = Some((i, dist));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+fn draw_curve(cr: &gtk::cairo::Context, w: f64, h: f64, pts: &[FanCurvePoint], min: f64, max: f64) {
+    cr.set_line_width(1.0);
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
+    for t in (0..=100).step_by(20) {
+        let x = temp_to_x(f64::from(t), w);
+        cr.move_to(x, CURVE_TOP);
+        cr.line_to(x, h - CURVE_BOTTOM);
+    }
+    for i in 0..=4 {
+        let rpm = min + (max - min) * (f64::from(i) / 4.0);
+        let y = rpm_to_y(rpm, h, min, max);
+        cr.move_to(CURVE_LEFT, y);
+        cr.line_to(w - CURVE_RIGHT, y);
+    }
+    let _ = cr.stroke();
+
+    cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+    cr.set_font_size(10.0);
+    for t in (0..=100).step_by(20) {
+        let x = temp_to_x(f64::from(t), w);
+        cr.move_to(x - 8.0, h - CURVE_BOTTOM + 14.0);
+        let _ = cr.show_text(&format!("{}\u{00B0}", t));
+    }
+    for i in 0..=4 {
+        let rpm = min + (max - min) * (f64::from(i) / 4.0);
+        let y = rpm_to_y(rpm, h, min, max);
+        cr.move_to(4.0, y + 3.0);
+        let _ = cr.show_text(&format!("{}", rpm.round() as i32));
+    }
+
+    if pts.is_empty() {
+        return;
+    }
+
+    cr.set_line_width(2.0);
+    cr.set_source_rgba(0.4, 0.6, 1.0, 0.9);
+    let first = &pts[0];
+    cr.move_to(CURVE_LEFT, rpm_to_y(f64::from(first.rpm), h, min, max));
+    for p in pts {
+        cr.line_to(temp_to_x(f64::from(p.temp_c), w), rpm_to_y(f64::from(p.rpm), h, min, max));
+    }
+    let last = &pts[pts.len() - 1];
+    cr.line_to(w - CURVE_RIGHT, rpm_to_y(f64::from(last.rpm), h, min, max));
+    let _ = cr.stroke();
+
+    cr.set_source_rgba(0.55, 0.72, 1.0, 1.0);
+    for p in pts {
+        let px = temp_to_x(f64::from(p.temp_c), w);
+        let py = rpm_to_y(f64::from(p.rpm), h, min, max);
+        cr.arc(px, py, CURVE_HANDLE_RADIUS, 0.0, std::f64::consts::PI * 2.0);
+        let _ = cr.fill();
+    }
+}
+
+type CurveChangeCb = Rc<RefCell<Option<Box<dyn Fn(Vec<FanCurvePoint>)>>>>;
+
+fn fire_curve_change(cb: &CurveChangeCb, pts: &[FanCurvePoint]) {
+    if let Some(f) = cb.borrow().as_ref() {
+        f(pts.to_vec());
+    }
+}
+
+/// A graphical fan-curve editor: temperature (x, 0-100 °C) vs RPM (y, model
+/// min-max). Drag a point to move it, left-click empty space to add one,
+/// right-click a point to remove it (minimum two points). Edits fire the
+/// `connect_changed` callback with the new, temperature-sorted point list.
+pub struct CurveEditor {
+    pub widget: gtk::DrawingArea,
+    points: Rc<RefCell<Vec<FanCurvePoint>>>,
+    on_change: CurveChangeCb,
+}
+
+impl CurveEditor {
+    pub fn new(rpm_min: u16, rpm_max: u16, initial: Vec<FanCurvePoint>) -> Self {
+        let area = gtk::DrawingArea::new();
+        area.set_content_height(220);
+        area.set_hexpand(true);
+        area.set_margin_top(8);
+        area.set_margin_bottom(8);
+        area.set_margin_start(12);
+        area.set_margin_end(12);
+
+        let points = Rc::new(RefCell::new(initial));
+        let on_change: CurveChangeCb = Rc::new(RefCell::new(None));
+        let min = f64::from(rpm_min);
+        let max = f64::from(rpm_max);
+
+        {
+            let points = points.clone();
+            area.set_draw_func(move |_, cr, w, h| {
+                draw_curve(cr, f64::from(w), f64::from(h), &points.borrow(), min, max);
+            });
+        }
+
+        let drag_idx = Rc::new(Cell::new(None::<usize>));
+        let drag = gtk::GestureDrag::new();
+        {
+            let points = points.clone();
+            let drag_idx = drag_idx.clone();
+            let area_ref = area.clone();
+            drag.connect_drag_begin(move |_, x, y| {
+                let w = f64::from(area_ref.width());
+                let h = f64::from(area_ref.height());
+                drag_idx.set(nearest_curve_point(&points.borrow(), x, y, w, h, min, max));
+            });
+        }
+        {
+            let points = points.clone();
+            let drag_idx = drag_idx.clone();
+            let area_ref = area.clone();
+            drag.connect_drag_update(move |g, ox, oy| {
+                let idx = match drag_idx.get() {
+                    Some(i) => i,
+                    None => return,
+                };
+                let (sx, sy) = match g.start_point() {
+                    Some(p) => p,
+                    None => return,
+                };
+                let w = f64::from(area_ref.width());
+                let h = f64::from(area_ref.height());
+                let mut pts = points.borrow_mut();
+                let len = pts.len();
+                let lo = if idx > 0 { f64::from(pts[idx - 1].temp_c) + 1.0 } else { 0.0 };
+                let hi = if idx + 1 < len { f64::from(pts[idx + 1].temp_c) - 1.0 } else { 100.0 };
+                let temp = x_to_temp(sx + ox, w).clamp(lo, hi.max(lo));
+                let rpm = y_to_rpm(sy + oy, h, min, max);
+                pts[idx].temp_c = temp.round() as u8;
+                pts[idx].rpm = rpm.round() as u16;
+                drop(pts);
+                area_ref.queue_draw();
+            });
+        }
+        {
+            let points = points.clone();
+            let drag_idx = drag_idx.clone();
+            let on_change = on_change.clone();
+            drag.connect_drag_end(move |_, _, _| {
+                if drag_idx.get().is_some() {
+                    drag_idx.set(None);
+                    fire_curve_change(&on_change, &points.borrow());
+                }
+            });
+        }
+        area.add_controller(drag);
+
+        let click = gtk::GestureClick::new();
+        click.set_button(0); // listen to all buttons
+        {
+            let points = points.clone();
+            let on_change = on_change.clone();
+            let area_ref = area.clone();
+            click.connect_pressed(move |g, _n, x, y| {
+                let w = f64::from(area_ref.width());
+                let h = f64::from(area_ref.height());
+                let near = nearest_curve_point(&points.borrow(), x, y, w, h, min, max);
+                match g.current_button() {
+                    3 => {
+                        if let Some(idx) = near {
+                            let mut pts = points.borrow_mut();
+                            if pts.len() > 2 {
+                                pts.remove(idx);
+                            }
+                            drop(pts);
+                            area_ref.queue_draw();
+                            fire_curve_change(&on_change, &points.borrow());
+                        }
+                    }
+                    1 => {
+                        if near.is_none() {
+                            let temp = x_to_temp(x, w).round() as u8;
+                            let rpm = y_to_rpm(y, h, min, max).round() as u16;
+                            let mut pts = points.borrow_mut();
+                            pts.push(FanCurvePoint { temp_c: temp, rpm });
+                            pts.sort_by_key(|p| p.temp_c);
+                            drop(pts);
+                            area_ref.queue_draw();
+                            fire_curve_change(&on_change, &points.borrow());
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+        area.add_controller(click);
+
+        CurveEditor { widget: area, points, on_change }
+    }
+
+    pub fn set_points(&self, pts: Vec<FanCurvePoint>) {
+        *self.points.borrow_mut() = pts;
+        self.widget.queue_draw();
+    }
+
+    pub fn connect_changed<F: Fn(Vec<FanCurvePoint>) + 'static>(&self, f: F) {
+        *self.on_change.borrow_mut() = Some(Box::new(f));
     }
 }

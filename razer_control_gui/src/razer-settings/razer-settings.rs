@@ -4,7 +4,7 @@ use gtk::prelude::*;
 use adw::prelude::*;
 use std::fs;
 use std::rc::Rc;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -265,6 +265,32 @@ fn set_fan_speed(ac: bool, value: i32) -> Option<bool> {
         SetFanSpeed { result } => Some(result),
         response => {
             println!("Instead of SetFanSpeed got {response:?}");
+            None
+        }
+    }
+}
+
+fn get_fan_curve(ac: bool) -> Option<comms::FanCurve> {
+    let ac = if ac { 1 } else { 0 };
+    let response = send_data(comms::DaemonCommand::GetFanCurve { ac })?;
+    use comms::DaemonResponse::*;
+    match response {
+        GetFanCurve { curve } => Some(curve),
+        response => {
+            println!("Instead of GetFanCurve got {response:?}");
+            None
+        }
+    }
+}
+
+fn set_fan_curve(ac: bool, curve: comms::FanCurve) -> Option<bool> {
+    let ac = if ac { 1 } else { 0 };
+    let response = send_data(comms::DaemonCommand::SetFanCurve { ac, curve })?;
+    use comms::DaemonResponse::*;
+    match response {
+        SetFanCurve { result } => Some(result),
+        response => {
+            println!("Instead of SetFanCurve got {response:?}");
             None
         }
     }
@@ -1118,41 +1144,113 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     let fan_section = settings_page.add_section(Some("Cooling"));
 
     let fan_speed = get_fan_speed(initial_ac).unwrap_or(0);
-    let min_fan_speed = *device.fan.get(0).unwrap_or(&0) as f64;
-    let max_fan_speed = *device.fan.get(1).unwrap_or(&5000) as f64;
-    let auto = fan_speed == 0;
+    let min_fan = *device.fan.get(0).unwrap_or(&0);
+    let max_fan = *device.fan.get(1).unwrap_or(&5000);
+    let min_fan_speed = min_fan as f64;
+    let max_fan_speed = max_fan as f64;
 
-    let fan_switch = make_switch_row(
-        "Automatic Fan Control",
-        "Let the system manage fan speed",
-        auto,
+    // Shared smart-curve state for this page (enabled / source / cpu / gpu points).
+    let initial_curve = get_fan_curve(initial_ac).unwrap_or_else(comms::FanCurve::new);
+    let curve_state = Rc::new(RefCell::new(initial_curve.clone()));
+
+    // Fan is a 3-way choice: Automatic (rpm 0), Manual (fixed rpm), Smart Curve.
+    let initial_mode: u32 = if initial_curve.enabled {
+        2
+    } else if fan_speed == 0 {
+        0
+    } else {
+        1
+    };
+
+    let mode_combo = make_combo_row(
+        "Fan Mode",
+        "Automatic, fixed manual speed, or a smart temperature curve",
+        &["Automatic", "Manual", "Smart Curve"],
+        initial_mode,
     );
-    fan_section.add_row(&fan_switch);
+    fan_section.add_row(&mode_combo);
 
     let fan_slider = SliderRow::new(
         "Fan Speed (RPM)",
         "Manual cooling performance",
         min_fan_speed, max_fan_speed, 100.0,
-        if auto { min_fan_speed } else { fan_speed as f64 },
+        if fan_speed > 0 { fan_speed as f64 } else { min_fan_speed },
     );
     fan_slider.add_mark(min_fan_speed, Some("Min"));
     fan_slider.add_mark(max_fan_speed, Some("Max"));
-    fan_slider.scale.set_sensitive(!auto);
     fan_section.add_row(&fan_slider.container);
+
+    let source_idx: u32 = match initial_curve.source {
+        comms::CurveTempSource::Cpu => 0,
+        comms::CurveTempSource::Gpu => 1,
+        comms::CurveTempSource::Both => 2,
+    };
+    let source_combo = make_combo_row(
+        "Curve Temperature Source",
+        "Which temperature drives the fan curve",
+        &["CPU", "GPU", "Both"],
+        source_idx,
+    );
+    fan_section.add_row(&source_combo);
+
+    // One editor per zone curve; visibility follows the selected source.
+    let cpu_editor = Rc::new(CurveEditor::new(min_fan, max_fan, initial_curve.cpu_points.clone()));
+    let gpu_editor = Rc::new(CurveEditor::new(min_fan, max_fan, initial_curve.gpu_points.clone()));
+
+    let cpu_curve_label = gtk::Label::new(Some("CPU Curve  \u{2014}  drag points, click to add, right-click to remove"));
+    cpu_curve_label.add_css_class("dim-label");
+    cpu_curve_label.add_css_class("caption");
+    cpu_curve_label.set_halign(gtk::Align::Start);
+    cpu_curve_label.set_margin_start(12);
+    cpu_curve_label.set_margin_top(8);
+    let gpu_curve_label = gtk::Label::new(Some("GPU Curve  \u{2014}  drag points, click to add, right-click to remove"));
+    gpu_curve_label.add_css_class("dim-label");
+    gpu_curve_label.add_css_class("caption");
+    gpu_curve_label.set_halign(gtk::Align::Start);
+    gpu_curve_label.set_margin_start(12);
+    gpu_curve_label.set_margin_top(8);
+
+    fan_section.add_row(&cpu_curve_label);
+    fan_section.add_row(&cpu_editor.widget);
+    fan_section.add_row(&gpu_curve_label);
+    fan_section.add_row(&gpu_editor.widget);
+
+    // Visibility controller shared across the mode/source handlers and refresh.
+    let update_cooling_visibility: Rc<dyn Fn(u32, u32)> = {
+        let fan_container = fan_slider.container.clone();
+        let source_combo = source_combo.clone();
+        let cpu_editor = cpu_editor.clone();
+        let gpu_editor = gpu_editor.clone();
+        let cpu_curve_label = cpu_curve_label.clone();
+        let gpu_curve_label = gpu_curve_label.clone();
+        Rc::new(move |mode: u32, source: u32| {
+            fan_container.set_visible(mode == 1);
+            source_combo.set_visible(mode == 2);
+            let cpu_vis = mode == 2 && (source == 0 || source == 2);
+            let gpu_vis = mode == 2 && (source == 1 || source == 2);
+            cpu_curve_label.set_visible(cpu_vis);
+            cpu_editor.widget.set_visible(cpu_vis);
+            gpu_curve_label.set_visible(gpu_vis);
+            gpu_editor.widget.set_visible(gpu_vis);
+        })
+    };
+    update_cooling_visibility(initial_mode, source_idx);
 
     // --- Callbacks ---
 
     // Refresh helper: re-query daemon and update all widgets on this page
-    let refresh = {
+    let refresh: Rc<dyn Fn()> = {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
         let power_combo = power_combo.clone();
         let cpu_combo = cpu_combo.clone();
         let gpu_combo = gpu_combo.clone();
-        let fan_switch = fan_switch.clone();
+        let mode_combo = mode_combo.clone();
+        let source_combo = source_combo.clone();
         let fan_scale = fan_slider.scale.clone();
+        let update_cooling_visibility = update_cooling_visibility.clone();
         let min_fan = min_fan_speed;
-        move || {
+        Rc::new(move || {
             refreshing.set(true);
             let ac = is_ac.get();
             if let Some(pwr) = get_power(ac) {
@@ -1164,17 +1262,46 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
                 cpu_combo.set_visible(show);
                 gpu_combo.set_visible(show);
             }
+            // Poll the fan mode without clobbering in-progress curve edits: only
+            // the mode selector, the manual slider value and visibility refresh
+            // here. Curve points/source reload on AC switch (reload_curve).
             let fs = get_fan_speed(ac).unwrap_or(0);
-            let auto = fs == 0;
-            fan_switch.set_active(auto);
-            fan_scale.set_sensitive(!auto);
-            if !auto {
+            let curve_on = get_fan_curve(ac).map_or(false, |c| c.enabled);
+            let mode = if curve_on { 2 } else if fs == 0 { 0 } else { 1 };
+            mode_combo.set_selected(mode);
+            if mode == 1 {
                 fan_scale.set_value(fs as f64);
-            } else {
+            } else if mode == 0 {
                 fan_scale.set_value(min_fan);
             }
+            update_cooling_visibility(mode, source_combo.selected());
             refreshing.set(false);
-        }
+        })
+    };
+
+    // Reload the full curve (source + points) for the current AC state. Used on
+    // AC/Battery switch, where replacing the editor contents is intended.
+    let reload_curve: Rc<dyn Fn()> = {
+        let is_ac = is_ac.clone();
+        let refreshing = refreshing.clone();
+        let curve_state = curve_state.clone();
+        let source_combo = source_combo.clone();
+        let cpu_editor = cpu_editor.clone();
+        let gpu_editor = gpu_editor.clone();
+        Rc::new(move || {
+            if let Some(curve) = get_fan_curve(is_ac.get()) {
+                refreshing.set(true);
+                source_combo.set_selected(match curve.source {
+                    comms::CurveTempSource::Cpu => 0,
+                    comms::CurveTempSource::Gpu => 1,
+                    comms::CurveTempSource::Both => 2,
+                });
+                cpu_editor.set_points(curve.cpu_points.clone());
+                gpu_editor.set_points(curve.gpu_points.clone());
+                *curve_state.borrow_mut() = curve;
+                refreshing.set(false);
+            }
+        })
     };
 
     // Toggle callback — hook the actual toggle buttons to refresh page state
@@ -1183,8 +1310,10 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         if let Some(ac_btn) = first_child {
             if let Ok(tb) = ac_btn.downcast::<gtk::ToggleButton>() {
                 let refresh = refresh.clone();
+                let reload_curve = reload_curve.clone();
                 tb.connect_toggled(move |btn| {
                     if btn.is_active() {
+                        reload_curve();
                         refresh();
                     }
                 });
@@ -1194,8 +1323,10 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         if let Some(bat_btn) = last_child {
             if let Ok(tb) = bat_btn.downcast::<gtk::ToggleButton>() {
                 let refresh = refresh.clone();
+                let reload_curve = reload_curve.clone();
                 tb.connect_toggled(move |btn| {
                     if btn.is_active() {
+                        reload_curve();
                         refresh();
                     }
                 });
@@ -1262,39 +1393,99 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         ));
     }
 
-    // Fan control callbacks
+    // Fan slider (Manual mode): persist the fixed RPM as the user drags.
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        let fan_switch_ref = fan_switch.clone();
         fan_slider.scale.connect_value_changed(move |sc| {
             if refreshing.get() { return; }
-            let ac = is_ac.get();
-            let value = sc.value();
-            set_fan_speed(ac, value as i32);
-            fan_switch_ref.set_active(false);
+            set_fan_speed(is_ac.get(), sc.value() as i32);
         });
     }
 
+    // Fan mode selector: Automatic / Manual / Smart Curve.
     {
         let is_ac = is_ac.clone();
-        let refreshing_ref = refreshing.clone();
-        let scale_ref = fan_slider.scale.clone();
-        fan_switch.connect_active_notify(glib::clone!(
-            #[weak] scale_ref,
-            move |sw| {
-                if refreshing_ref.get() { return; }
-                let ac = is_ac.get();
-                let state = sw.is_active();
-                if state {
-                    set_fan_speed(ac, 0);
-                } else {
-                    set_fan_speed(ac, min_fan_speed as i32);
-                    scale_ref.set_value(min_fan_speed);
+        let refreshing = refreshing.clone();
+        let curve_state = curve_state.clone();
+        let source_combo = source_combo.clone();
+        let fan_scale = fan_slider.scale.clone();
+        let update_cooling_visibility = update_cooling_visibility.clone();
+        mode_combo.connect_selected_notify(move |c| {
+            if refreshing.get() { return; }
+            let ac = is_ac.get();
+            let mode = c.selected();
+            match mode {
+                0 => { set_fan_speed(ac, 0); }
+                1 => {
+                    let value = fan_scale.value().max(min_fan_speed);
+                    fan_scale.set_value(value);
+                    set_fan_speed(ac, value as i32);
                 }
-                scale_ref.set_sensitive(!state);
+                2 => {
+                    let snapshot = {
+                        let mut curve = curve_state.borrow_mut();
+                        curve.enabled = true;
+                        curve.clone()
+                    };
+                    set_fan_curve(ac, snapshot);
+                }
+                _ => {}
             }
-        ));
+            update_cooling_visibility(mode, source_combo.selected());
+        });
+    }
+
+    // Curve temperature source.
+    {
+        let is_ac = is_ac.clone();
+        let refreshing = refreshing.clone();
+        let curve_state = curve_state.clone();
+        let update_cooling_visibility = update_cooling_visibility.clone();
+        source_combo.connect_selected_notify(move |c| {
+            if refreshing.get() { return; }
+            let source = match c.selected() {
+                1 => comms::CurveTempSource::Gpu,
+                2 => comms::CurveTempSource::Both,
+                _ => comms::CurveTempSource::Cpu,
+            };
+            let snapshot = {
+                let mut curve = curve_state.borrow_mut();
+                curve.source = source;
+                curve.enabled = true;
+                curve.clone()
+            };
+            set_fan_curve(is_ac.get(), snapshot);
+            update_cooling_visibility(2, c.selected());
+        });
+    }
+
+    // Curve editors persist their zone's points on every edit.
+    {
+        let is_ac = is_ac.clone();
+        let curve_state = curve_state.clone();
+        cpu_editor.connect_changed(move |pts| {
+            let snapshot = {
+                let mut curve = curve_state.borrow_mut();
+                curve.cpu_points = pts;
+                curve.enabled = true;
+                curve.clone()
+            };
+            set_fan_curve(is_ac.get(), snapshot);
+        });
+    }
+    {
+        let is_ac = is_ac.clone();
+        let curve_state = curve_state.clone();
+        gpu_editor.connect_changed(move |pts| {
+            let snapshot = {
+                let mut curve = curve_state.borrow_mut();
+                curve.gpu_points = pts;
+                curve.enabled = true;
+                curve.clone()
+            };
+            set_fan_curve(is_ac.get(), snapshot);
+        });
     }
 
     // -----------------------------------------------------------------------

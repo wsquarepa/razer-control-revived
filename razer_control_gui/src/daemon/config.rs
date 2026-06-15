@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, fs::File, io, env};
 use std::io::prelude::*;
+use crate::comms::FanCurve;
 
 const SETTINGS_FILE: &str = "/.local/share/razercontrol/daemon.json";
 const EFFECTS_FILE: &str = "/.local/share/razercontrol/effects.json";
 
-#[derive(Serialize, Deserialize, Copy, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct PowerConfig {
     pub power_mode: u8,
     pub cpu_boost: u8,
@@ -15,6 +16,8 @@ pub struct PowerConfig {
     pub logo_state: u8,
     pub screensaver: bool, // turno of keyboard light if screen is blank
     pub idle: u32,
+    #[serde(default = "FanCurve::new")]
+    pub fan_curve: FanCurve,
 }
 
 impl PowerConfig {
@@ -28,6 +31,7 @@ impl PowerConfig {
             logo_state: 0,
             screensaver: false,
             idle: 0,
+            fan_curve: FanCurve::new(),
         }
     }
 }

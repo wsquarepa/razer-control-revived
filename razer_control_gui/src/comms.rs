@@ -24,6 +24,64 @@ pub struct GpuInfo {
     pub runtime_status: String,
 }
 
+/// A single temperature -> fan-speed point on a smart fan curve.
+/// Points are kept sorted by `temp_c` ascending.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct FanCurvePoint {
+    pub temp_c: u8,
+    pub rpm: u16,
+}
+
+/// Which temperature drives the smart fan curve.
+///
+/// `Both` does NOT mean max(cpuTemp, gpuTemp): the CPU temp is looked up on the
+/// CPU curve and the GPU temp on the GPU curve, and whichever lookup yields the
+/// higher RPM wins (mirrors Synapse's activeTemperatureMode + useBothTemperatures).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub enum CurveTempSource {
+    Cpu,
+    Gpu,
+    Both,
+}
+
+/// A smart fan curve: the daemon evaluates this continuously and drives the fans
+/// in manual mode. Stored per AC state so AC and battery can differ.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FanCurve {
+    pub enabled: bool,
+    pub source: CurveTempSource,
+    /// Used when `source` is `Cpu` or `Both`.
+    pub cpu_points: Vec<FanCurvePoint>,
+    /// Used when `source` is `Gpu` or `Both`.
+    pub gpu_points: Vec<FanCurvePoint>,
+}
+
+impl FanCurve {
+    #[allow(dead_code)]
+    pub fn new() -> FanCurve {
+        FanCurve {
+            enabled: false,
+            source: CurveTempSource::Cpu,
+            cpu_points: default_curve_points(),
+            gpu_points: default_curve_points(),
+        }
+    }
+}
+
+/// A gentle default curve spanning a typical laptop fan range. Points outside a
+/// given model's range are clamped to that range when applied to hardware.
+#[allow(dead_code)]
+pub fn default_curve_points() -> Vec<FanCurvePoint> {
+    vec![
+        FanCurvePoint { temp_c: 40, rpm: 2200 },
+        FanCurvePoint { temp_c: 50, rpm: 2600 },
+        FanCurvePoint { temp_c: 60, rpm: 3200 },
+        FanCurvePoint { temp_c: 70, rpm: 3900 },
+        FanCurvePoint { temp_c: 80, rpm: 4500 },
+        FanCurvePoint { temp_c: 90, rpm: 5000 },
+    ]
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 /// Represents data sent TO the daemon
 pub enum DaemonCommand {
@@ -51,6 +109,8 @@ pub enum DaemonCommand {
     GetGpuStatus,
     SetDgpuRuntimePM { enabled: bool },
     SetGpuMode { mode: String },
+    SetFanCurve { ac: usize, curve: FanCurve },
+    GetFanCurve { ac: usize },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -86,6 +146,8 @@ pub enum DaemonResponse {
     },
     SetDgpuRuntimePM { result: bool },
     SetGpuMode { result: bool, message: String },
+    SetFanCurve { result: bool },
+    GetFanCurve { curve: FanCurve },
 }
 
 #[allow(dead_code)]
