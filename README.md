@@ -129,7 +129,7 @@ services.razer-laptop-control.enable = true;
 sudo pacman -S rust cargo dbus libusb hidapi pkgconf systemd gtk4 libadwaita git
 
 # Clone and install
-git clone https://github.com/encomjp/razercontrol-revived
+git clone https://github.com/encomjp/razer-control-revived
 cd razercontrol-revived/razer_control_gui
 ./install.sh install
 ```
