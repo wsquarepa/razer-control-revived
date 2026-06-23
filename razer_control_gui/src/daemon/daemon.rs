@@ -42,6 +42,14 @@ const DGPU_RESUME_POLL_SECS: u64 = 2;
 const WAKE_SETTLE_REAPPLIES: u32 = 8;
 const WAKE_SETTLE_INTERVAL_SECS: u64 = 2;
 
+// A single re-apply when the dGPU first goes active can lose the same race the
+// wake path guards against: after a system resume the firmware may still be
+// finishing its GPU-power-zone reset when a game wakes the dGPU, overwriting a
+// one-shot re-apply back to the balanced TGP. Re-asserting the profile across
+// the next few poll ticks — but only while the dGPU stays active — re-latches
+// custom-mode GPU boost once the firmware has settled.
+const DGPU_RESUME_REAPPLIES: u32 = 8;
+
 // How often the smart fan-curve control loop re-evaluates temperatures and
 // drives the fans. A step lookup plus last-value equality keeps this from
 // hunting at steady state, so a short cadence is safe.
@@ -329,11 +337,15 @@ fn start_battery_monitor_task() -> JoinHandle<()> {
 
 /// Re-applies the saved power profile whenever the dGPU transitions from
 /// runtime-suspended to active, so custom-mode GPU boost latches once a GPU
-/// client (e.g. a game) powers the dGPU up. See DGPU_RESUME_POLL_SECS.
+/// client (e.g. a game) powers the dGPU up. Each transition starts a settling
+/// burst (re-asserting on the next few poll ticks while the dGPU stays active)
+/// so a late post-resume firmware reset cannot leave the dGPU at the balanced
+/// TGP. See DGPU_RESUME_POLL_SECS and DGPU_RESUME_REAPPLIES.
 fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
     thread::spawn(|| {
         let mut dgpu_path = gpu::find_dgpu_sysfs_path();
         let mut was_active = false;
+        let mut reapplies_remaining: u32 = 0;
         loop {
             thread::sleep(time::Duration::from_secs(DGPU_RESUME_POLL_SECS));
             if dgpu_path.is_none() {
@@ -344,10 +356,14 @@ fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
                 .and_then(|p| std::fs::read_to_string(p.join("power/runtime_status")).ok())
                 .map_or(false, |s| s.trim() == "active");
             if active && !was_active {
+                println!("dGPU resumed — re-applying power profile (settling)");
+                reapplies_remaining = DGPU_RESUME_REAPPLIES;
+            }
+            if active && reapplies_remaining > 0 {
                 if let Ok(mut d) = DEV_MANAGER.lock() {
-                    println!("dGPU resumed — re-applying power profile");
                     d.reapply_power_mode();
                 }
+                reapplies_remaining -= 1;
             }
             was_active = active;
         }

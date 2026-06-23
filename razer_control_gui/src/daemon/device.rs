@@ -319,6 +319,10 @@ impl DeviceManager {
             Some(config) => config,
             None => return false,
         };
+        println!(
+            "Re-applying power profile: ac={} power_mode={} cpu_boost={} gpu_boost={}",
+            ac, config.power_mode, config.cpu_boost, config.gpu_boost
+        );
         match self.get_device() {
             Some(laptop) => laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost),
             None => false,
