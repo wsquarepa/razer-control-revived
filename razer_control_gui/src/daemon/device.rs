@@ -1397,8 +1397,14 @@ impl RazerLaptop {
             }
 
             let mut resend = false;
-            for _ in 0..Self::SEND_READ_POLLS {
-                thread::sleep(poll_interval);
+            for poll in 0..Self::SEND_READ_POLLS {
+                // Read immediately on the first poll: when the EC already has the
+                // reply buffered, return without paying a full poll interval. A
+                // not-yet-ready or stale reply still classifies as KeepPolling, so
+                // later polls sleep and re-read exactly as before.
+                if poll > 0 {
+                    thread::sleep(poll_interval);
+                }
                 let mut buf: [u8; 91] = [0x00; 91];
                 let size = match self.device.get_feature_report(&mut buf) {
                     Ok(size) => size,
