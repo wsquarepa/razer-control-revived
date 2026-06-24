@@ -498,10 +498,10 @@ impl DeviceManager {
 
         if let Some(laptop) = self.get_device() {
             if need_establish {
+                // set_fan_manual issues two 0x0d/0x02 writes; send_report already
+                // settles 200ms after each, latching manual mode before the speed
+                // writes below. No additional sleep needed here.
                 laptop.set_fan_manual();
-                // Let the EC latch manual mode before the first speed write
-                // (Synapse sleeps 200ms after every setThermalFanMode).
-                thread::sleep(time::Duration::from_millis(200));
             }
             laptop.set_zone_rpm(0x01, target);
             laptop.set_zone_rpm(0x02, target);
@@ -533,10 +533,10 @@ impl DeviceManager {
             None => return, // never computed yet; the next curve tick establishes
         };
         if let Some(laptop) = self.get_device() {
+            // set_fan_manual's per-command settle (200ms after each 0x0d/0x02
+            // write) latches manual mode before the speed writes; mirrors
+            // fan_curve_tick.
             laptop.set_fan_manual();
-            // Let the EC latch manual mode before the speed write (Synapse sleeps
-            // 200ms after setThermalFanMode); mirrors fan_curve_tick.
-            thread::sleep(time::Duration::from_millis(200));
             laptop.set_zone_rpm(0x01, target);
             laptop.set_zone_rpm(0x02, target);
         }
