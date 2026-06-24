@@ -20,6 +20,49 @@ use error_handling::*;
 use widgets::*;
 use util::*;
 
+/// Trailing-debounce window for slider drags. Each `value_changed` tick cancels
+/// the previously armed fire, so a drag results in one daemon write after the
+/// slider is released/stops, instead of a blocking IPC round-trip per tick on
+/// the GTK main thread.
+const SLIDER_DEBOUNCE_MS: u64 = 180;
+
+/// Wire `scale`'s `value_changed` so `action` runs once with the final value
+/// after the slider has been quiet for `SLIDER_DEBOUNCE_MS`. `refreshing`
+/// suppresses programmatic updates both when arming and when firing.
+fn connect_debounced_value_changed<F: Fn(f64) + 'static>(
+    scale: &gtk::Scale,
+    refreshing: Rc<Cell<bool>>,
+    action: F,
+) {
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let action = Rc::new(action);
+    scale.connect_value_changed(move |sc| {
+        if refreshing.get() {
+            return;
+        }
+        if let Some(id) = pending.borrow_mut().take() {
+            id.remove();
+        }
+        let value = sc.value();
+        let action = action.clone();
+        let refreshing = refreshing.clone();
+        let pending_clear = pending.clone();
+        let id = glib::timeout_add_local_once(
+            Duration::from_millis(SLIDER_DEBOUNCE_MS),
+            move || {
+                *pending_clear.borrow_mut() = None;
+                // A refresh may have begun after this fire was armed; don't push a
+                // stale user value back to the daemon.
+                if refreshing.get() {
+                    return;
+                }
+                action(value);
+            },
+        );
+        *pending.borrow_mut() = Some(id);
+    });
+}
+
 fn send_data(opt: comms::DaemonCommand) -> Option<comms::DaemonResponse> {
     match comms::try_bind() {
         Ok(socket) => comms::send_to_daemon(opt, socket),
@@ -1397,9 +1440,8 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        fan_slider.scale.connect_value_changed(move |sc| {
-            if refreshing.get() { return; }
-            set_fan_speed(is_ac.get(), sc.value() as i32);
+        connect_debounced_value_changed(&fan_slider.scale, refreshing, move |value| {
+            set_fan_speed(is_ac.get(), value as i32);
         });
     }
 
@@ -1887,10 +1929,8 @@ fn make_lighting_page(device: SupportedDevice) -> SettingsPage {
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        brightness_slider.scale.connect_value_changed(move |sc| {
-            if refreshing.get() { return; }
-            let ac = is_ac.get();
-            set_brightness(ac, sc.value() as u8);
+        connect_debounced_value_changed(&brightness_slider.scale, refreshing, move |value| {
+            set_brightness(is_ac.get(), value as u8);
         });
     }
 
@@ -1953,11 +1993,8 @@ fn make_battery_page() -> SettingsPage {
         {
             let bho_switch_ref = bho_switch.clone();
             let refreshing = refreshing.clone();
-            bho_slider.scale.connect_value_changed(move |sc| {
-                if refreshing.get() { return; }
-                let is_on = bho_switch_ref.is_active();
-                let threshold = sc.value() as u8;
-                set_bho(is_on, threshold);
+            connect_debounced_value_changed(&bho_slider.scale, refreshing, move |value| {
+                set_bho(bho_switch_ref.is_active(), value as u8);
             });
         }
 
