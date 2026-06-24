@@ -24,17 +24,19 @@ use util::*;
 /// not on every intermediate change. A pointer drag emits a stream of
 /// `value_changed` ticks, and each `action` is a blocking IPC round-trip on the
 /// GTK main thread; firing per tick freezes the UI mid-drag. We track the
-/// pointer button with a `GestureClick` and commit the final value only on
-/// release. Keyboard and scroll-wheel changes are discrete (not a drag), so they
-/// fall through `value_changed` and commit immediately. `refreshing` suppresses
-/// programmatic updates.
+/// pointer button with a `GestureClick`, set `dragging` while it is held, and
+/// commit the final value only on release. Keyboard and scroll-wheel changes are
+/// discrete (not a drag), so they fall through `value_changed` and commit
+/// immediately. `dragging` is owned by the caller so its periodic refresh can
+/// skip overwriting the slider while the user is mid-drag; `refreshing`
+/// suppresses programmatic updates.
 fn connect_commit_on_release<F: Fn(f64) + 'static>(
     scale: &gtk::Scale,
     refreshing: Rc<Cell<bool>>,
+    dragging: Rc<Cell<bool>>,
     action: F,
 ) {
     let action = Rc::new(action);
-    let dragging = Rc::new(Cell::new(false));
 
     let click = gtk::GestureClick::new();
     {
@@ -54,15 +56,19 @@ fn connect_commit_on_release<F: Fn(f64) + 'static>(
             action(scale.value());
         });
     }
+    {
+        // A cancelled gesture (lost pointer grab) never emits `released`; clear
+        // the flag so the periodic refresh resumes syncing the slider.
+        let dragging = dragging.clone();
+        click.connect_cancel(move |_, _| dragging.set(false));
+    }
     scale.add_controller(click);
 
     scale.connect_value_changed(move |sc| {
-        if refreshing.get() {
-            return;
-        }
-        // While the pointer button is held the release handler commits the final
-        // value; suppress the intermediate stream here.
-        if dragging.get() {
+        // Ignore programmatic refreshes and the mid-drag stream; the release
+        // handler commits the final dragged value. Keyboard/scroll changes pass
+        // through and commit immediately.
+        if refreshing.get() || dragging.get() {
             return;
         }
         action(sc.value());
@@ -1287,6 +1293,10 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
 
     // --- Callbacks ---
 
+    // Set true while the user drags the manual fan slider, so the periodic
+    // refresh below does not overwrite the handle with the daemon's stale value.
+    let fan_dragging = Rc::new(Cell::new(false));
+
     // Refresh helper: re-query daemon and update all widgets on this page
     let refresh: Rc<dyn Fn()> = {
         let is_ac = is_ac.clone();
@@ -1297,6 +1307,7 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         let mode_combo = mode_combo.clone();
         let source_combo = source_combo.clone();
         let fan_scale = fan_slider.scale.clone();
+        let fan_dragging = fan_dragging.clone();
         let update_cooling_visibility = update_cooling_visibility.clone();
         let min_fan = min_fan_speed;
         Rc::new(move || {
@@ -1318,10 +1329,14 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
             let curve_on = get_fan_curve(ac).map_or(false, |c| c.enabled);
             let mode = if curve_on { 2 } else if fs == 0 { 0 } else { 1 };
             mode_combo.set_selected(mode);
-            if mode == 1 {
-                fan_scale.set_value(fs as f64);
-            } else if mode == 0 {
-                fan_scale.set_value(min_fan);
+            // Don't fight an in-progress drag: the release handler will commit
+            // and the next refresh will then reflect the new value.
+            if !fan_dragging.get() {
+                if mode == 1 {
+                    fan_scale.set_value(fs as f64);
+                } else if mode == 0 {
+                    fan_scale.set_value(min_fan);
+                }
             }
             update_cooling_visibility(mode, source_combo.selected());
             refreshing.set(false);
@@ -1442,11 +1457,12 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         ));
     }
 
-    // Fan slider (Manual mode): persist the fixed RPM as the user drags.
+    // Fan slider (Manual mode): commit the fixed RPM when the drag ends.
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        connect_commit_on_release(&fan_slider.scale, refreshing, move |value| {
+        let fan_dragging = fan_dragging.clone();
+        connect_commit_on_release(&fan_slider.scale, refreshing, fan_dragging, move |value| {
             set_fan_speed(is_ac.get(), value as i32);
         });
     }
@@ -1887,16 +1903,21 @@ fn make_lighting_page(device: SupportedDevice) -> SettingsPage {
 
     // --- Callbacks for AC/Battery toggle (brightness + logo only) ---
 
+    let brightness_dragging = Rc::new(Cell::new(false));
+
     let refresh = {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
         let brightness_scale = brightness_slider.scale.clone();
+        let brightness_dragging = brightness_dragging.clone();
         let logo_combo = logo_combo.clone();
         move || {
             refreshing.set(true);
             let ac = is_ac.get();
             let br = get_brightness(ac).unwrap_or(100);
-            brightness_scale.set_value(br as f64);
+            if !brightness_dragging.get() {
+                brightness_scale.set_value(br as f64);
+            }
             if let Some(ref lc) = logo_combo {
                 let logo = get_logo(ac).unwrap_or(1);
                 lc.set_selected(logo as u32);
@@ -1935,7 +1956,8 @@ fn make_lighting_page(device: SupportedDevice) -> SettingsPage {
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        connect_commit_on_release(&brightness_slider.scale, refreshing, move |value| {
+        let brightness_dragging = brightness_dragging.clone();
+        connect_commit_on_release(&brightness_slider.scale, refreshing, brightness_dragging, move |value| {
             set_brightness(is_ac.get(), value as u8);
         });
     }
@@ -1996,10 +2018,13 @@ fn make_battery_page() -> SettingsPage {
         bho_slider.scale.set_sensitive(bho.0);
         section.add_row(&bho_slider.container);
 
+        let bho_dragging = Rc::new(Cell::new(false));
+
         {
             let bho_switch_ref = bho_switch.clone();
             let refreshing = refreshing.clone();
-            connect_commit_on_release(&bho_slider.scale, refreshing, move |value| {
+            let bho_dragging = bho_dragging.clone();
+            connect_commit_on_release(&bho_slider.scale, refreshing, bho_dragging, move |value| {
                 set_bho(bho_switch_ref.is_active(), value as u8);
             });
         }
@@ -2023,11 +2048,14 @@ fn make_battery_page() -> SettingsPage {
         {
             let bho_switch = bho_switch.clone();
             let bho_scale = bho_slider.scale.clone();
+            let bho_dragging = bho_dragging.clone();
             glib::timeout_add_local(Duration::from_secs(2), move || {
                 if let Some((is_on, threshold)) = get_bho() {
                     refreshing.set(true);
                     bho_switch.set_active(is_on);
-                    bho_scale.set_value(threshold as f64);
+                    if !bho_dragging.get() {
+                        bho_scale.set_value(threshold as f64);
+                    }
                     bho_scale.set_sensitive(is_on);
                     refreshing.set(false);
                 }
