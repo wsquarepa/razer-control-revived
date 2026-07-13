@@ -1376,6 +1376,10 @@ pub struct RazerLaptop {
     // monitor restarts its settle window on a wake re-latch instead of tripping
     // failback on spin-up-time tachometer samples.
     fan_apply_generation: u64,
+    // Last monitored tachometer sample per zone ([Cpu, Gpu]), reset on every
+    // fixed-fan apply. The verification cycle judges ramp progress against it
+    // because the EC slews manual targets over tens of seconds.
+    manual_tach_samples: [Option<u16>; 2],
 }
 //
 impl RazerLaptop {
@@ -1421,6 +1425,7 @@ impl RazerLaptop {
             transaction_id: 0,
             thermal_safety: thermal::ThermalSafetyState::Preflight,
             fan_apply_generation: 0,
+            manual_tach_samples: [None, None],
         };
     }
 
@@ -1845,6 +1850,8 @@ impl RazerLaptop {
                 // so the monitor restarts its settle window and does not count
                 // spin-up-time samples toward failback.
                 self.fan_apply_generation = self.fan_apply_generation.wrapping_add(1);
+                // Ramp-progress judging starts from a fresh baseline per apply.
+                self.manual_tach_samples = [None, None];
                 Ok(())
             }
         }
@@ -1886,12 +1893,16 @@ impl RazerLaptop {
     /// read short-circuits to a Transport failure; otherwise each zone's sample
     /// is classified against the target and the first failure wins.
     fn read_manual_cycle_event(&mut self, target: thermal::FanRpm) -> thermal::VerificationEvent {
-        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+        for (index, fan) in [thermal::FanId::Cpu, thermal::FanId::Gpu].into_iter().enumerate() {
             match self.read_current_fan_rpm(fan) {
-                Ok(reading) => match thermal::classify_manual_reading(target, reading.0) {
-                    thermal::VerificationEvent::Succeeded => continue,
-                    failed => return failed,
-                },
+                Ok(reading) => {
+                    let previous: Option<u16> = self.manual_tach_samples[index];
+                    self.manual_tach_samples[index] = Some(reading.0);
+                    match thermal::classify_manual_reading(target, reading.0, previous) {
+                        thermal::VerificationEvent::Succeeded => continue,
+                        failed => return failed,
+                    }
+                }
                 Err(error) => {
                     let failure: thermal::ThermalFailure = thermal_failure_class(&error);
                     eprintln!("thermal telemetry read failed for {fan:?}: {error:?}");
