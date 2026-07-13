@@ -50,7 +50,10 @@ lazy_static! {
     static ref DEV_MANAGER: Mutex<device::DeviceManager> = {
         match device::DeviceManager::read_laptops_file() {
             Ok(c) => Mutex::new(c),
-            Err(_) => Mutex::new(device::DeviceManager::new()),
+            Err(error) => {
+                eprintln!("failed to read supported-device list: {error}; starting with an empty device manager");
+                Mutex::new(device::DeviceManager::new())
+            }
         }
     };
 }
@@ -478,34 +481,36 @@ fn start_thermal_monitor_task() -> JoinHandle<()> {
     thread::spawn(|| {
         let settle = time::Duration::from_secs(THERMAL_MONITOR_SETTLE_SECS);
         let poll = time::Duration::from_secs(THERMAL_MONITOR_POLL_SECS);
-        let mut watching: Option<(thermal::FanRpm, time::Instant)> = None;
+        let mut watching: Option<(thermal::ManualWatch, time::Instant)> = None;
         loop {
             thread::sleep(poll);
-            let target = match DEV_MANAGER.lock() {
-                Ok(mut d) => d.thermal_manual_target(),
+            let observed = match DEV_MANAGER.lock() {
+                Ok(mut d) => d.thermal_manual_watch(),
                 Err(_) => continue,
             };
-            let target = match target {
-                Some(target) => target,
+            let observed = match observed {
+                Some(observed) => observed,
                 None => {
                     watching = None;
                     continue;
                 }
             };
-            match watching {
-                Some((watched, settle_deadline)) if watched == target => {
-                    if time::Instant::now() < settle_deadline {
-                        continue; // still inside this target's settling window
+            let (tracked, settle_elapsed) = match watching {
+                Some((watch, settle_deadline)) => (Some(watch), time::Instant::now() >= settle_deadline),
+                None => (None, false),
+            };
+            match thermal::decide_monitor_tick(tracked, observed, settle_elapsed) {
+                thermal::MonitorDecision::RestartSettle => {
+                    // Newly-applied, changed, or freshly re-applied fixed target
+                    // (a bumped generation): restart its settling window.
+                    watching = Some((observed, time::Instant::now() + settle));
+                }
+                thermal::MonitorDecision::Waiting => {}
+                thermal::MonitorDecision::RunCycle => {
+                    if let Ok(mut d) = DEV_MANAGER.lock() {
+                        d.run_thermal_verification_cycle();
                     }
                 }
-                _ => {
-                    // Newly-applied (or changed) fixed target: start its window.
-                    watching = Some((target, time::Instant::now() + settle));
-                    continue;
-                }
-            }
-            if let Ok(mut d) = DEV_MANAGER.lock() {
-                d.run_thermal_verification_cycle();
             }
         }
     })

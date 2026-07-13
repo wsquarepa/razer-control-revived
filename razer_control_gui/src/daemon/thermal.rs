@@ -586,6 +586,45 @@ pub fn classify_manual_reading(target: FanRpm, observed: u16) -> VerificationEve
     VerificationEvent::Succeeded
 }
 
+/// The monitor's identity for the armed fixed target: its value plus the apply
+/// generation that last armed it. The generation changes on every fresh apply,
+/// even a same-value re-apply (e.g. a wake re-latch), so the monitor can restart
+/// the settle window instead of letting two spin-up-time ticks trip failback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualWatch {
+    pub target: FanRpm,
+    pub generation: u64,
+}
+
+/// One monitor tick's pure decision: run a verification cycle, keep waiting, or
+/// restart the settle window for a freshly observed (or changed) target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorDecision {
+    RestartSettle,
+    Waiting,
+    RunCycle,
+}
+
+/// Decide one monitor tick. Pure: the settle window (whose timing the caller
+/// owns) restarts whenever the observed watch differs from the tracked one, so a
+/// changed target value *or* a fresh apply generation re-arms it before any
+/// tachometer check. Only when the same identity is still tracked and its window
+/// has elapsed is a verification cycle due.
+pub fn decide_monitor_tick(
+    tracked: Option<ManualWatch>,
+    observed: ManualWatch,
+    settle_elapsed: bool,
+) -> MonitorDecision {
+    if tracked != Some(observed) {
+        return MonitorDecision::RestartSettle;
+    }
+    if settle_elapsed {
+        MonitorDecision::RunCycle
+    } else {
+        MonitorDecision::Waiting
+    }
+}
+
 /// The outcome of returning one fan zone to firmware-automatic control during
 /// failback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -980,6 +1019,28 @@ mod tests {
                 VerificationEvent::Failed(ThermalFailure::TelemetryZero)
             );
         }
+    }
+
+    #[test]
+    fn fresh_apply_generation_restarts_settle_window() {
+        let watch_v1: ManualWatch = ManualWatch { target: FanRpm(4000), generation: 1 };
+        // Same target and generation, settle window elapsed: a cycle is due.
+        assert_eq!(decide_monitor_tick(Some(watch_v1), watch_v1, true), MonitorDecision::RunCycle);
+        // Same identity, still inside the window: wait.
+        assert_eq!(decide_monitor_tick(Some(watch_v1), watch_v1, false), MonitorDecision::Waiting);
+        // A fresh apply of the SAME target value bumps the generation, so the
+        // settle window restarts even though the window had elapsed. Two spin-up
+        // ticks after a wake re-apply must not be able to trip failback.
+        let watch_v2: ManualWatch = ManualWatch { target: FanRpm(4000), generation: 2 };
+        assert_eq!(decide_monitor_tick(Some(watch_v1), watch_v2, true), MonitorDecision::RestartSettle);
+        // A changed target value also restarts the window.
+        let watch_changed: ManualWatch = ManualWatch { target: FanRpm(5000), generation: 1 };
+        assert_eq!(
+            decide_monitor_tick(Some(watch_v1), watch_changed, true),
+            MonitorDecision::RestartSettle
+        );
+        // The first observation with nothing tracked starts the window.
+        assert_eq!(decide_monitor_tick(None, watch_v1, true), MonitorDecision::RestartSettle);
     }
 
     #[test]

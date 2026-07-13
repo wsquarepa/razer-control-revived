@@ -232,6 +232,47 @@ fn thermal_error_reason(error: &ThermalError) -> String {
     }
 }
 
+/// Map a config profile index to its power source: profile 1 is AC, profile 0
+/// is battery, matching `set_ac_state` (ac_state 1 == line power online).
+fn profile_power_source(ac: usize) -> thermal::PowerSource {
+    if ac == 1 {
+        thermal::PowerSource::Ac
+    } else {
+        thermal::PowerSource::Battery
+    }
+}
+
+/// Pure policy gate for a Blade 16 2025 power-mode request, run at the
+/// DeviceManager boundary before the request is persisted so a rejected request
+/// never corrupts daemon.json. Mirrors the availability and custom-level checks
+/// the verified device layer re-enforces when the profile becomes active.
+fn validate_power_request(
+    pwr: u8,
+    cpu: u8,
+    gpu: u8,
+    source: thermal::PowerSource,
+) -> Result<(), thermal::ThermalPolicyError> {
+    let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(pwr)?;
+    if !thermal::is_mode_selectable(source, mode) {
+        return Err(thermal::ThermalPolicyError::ModeNotSelectable { mode, source });
+    }
+    if mode == thermal::PerformanceMode::Custom {
+        thermal::validate_custom_level(cpu)?;
+        thermal::validate_custom_level(gpu)?;
+    }
+    Ok(())
+}
+
+/// Pure policy gate for a Blade 16 2025 fan-speed request. Validates the raw i32
+/// against the profile's mode range before any u16 truncation, so an aliasing
+/// value (e.g. 68936 -> 3400) cannot slip through, and before the request is
+/// persisted, so a rejected speed never corrupts daemon.json.
+fn validate_fan_request(pwr: u8, rpm: i32) -> Result<(), thermal::ThermalPolicyError> {
+    let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(pwr)?;
+    thermal::validate_fixed_rpm(mode, rpm)?;
+    Ok(())
+}
+
 /// Project a verified-apply/telemetry failure onto the typed IPC failure DTO.
 fn thermal_failure_dto(error: &ThermalError) -> comms::ThermalFailureDto {
     let code = match error {
@@ -597,7 +638,7 @@ impl DeviceManager {
         match self.get_device() {
             Some(laptop) => {
                 laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost)?;
-                laptop.set_fan_rpm(config.fan_rpm as u16)?;
+                laptop.set_fan_rpm(config.fan_rpm)?;
                 Ok(())
             }
             None => Ok(()),
@@ -727,6 +768,11 @@ impl DeviceManager {
     }
 
     pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> comms::CommandResult {
+        if self.is_blade_16_2025() {
+            if let Err(policy) = validate_power_request(pwr, cpu, gpu, profile_power_source(ac)) {
+                return comms::CommandResult::Rejected { reason: policy.to_string() };
+            }
+        }
         if let Some(config) = self.get_config() {
             config.power[ac].power_mode = pwr;
             config.power[ac].cpu_boost = cpu;
@@ -785,6 +831,13 @@ impl DeviceManager {
     }
 
     pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> comms::CommandResult {
+        if self.is_blade_16_2025() {
+            if let Some(profile) = self.get_ac_config(ac) {
+                if let Err(policy) = validate_fan_request(profile.power_mode, rpm) {
+                    return comms::CommandResult::Rejected { reason: policy.to_string() };
+                }
+            }
+        }
         if let Some(config) = self.get_config() {
             config.power[ac].fan_rpm = rpm;
             if let Err(e) = config.write_to_file() {
@@ -798,7 +851,7 @@ impl DeviceManager {
             if laptop.get_ac_state() != ac {
                 return comms::CommandResult::Applied;
             }
-            return match laptop.set_fan_rpm(rpm as u16) {
+            return match laptop.set_fan_rpm(rpm) {
                 Ok(()) => comms::CommandResult::Applied,
                 Err(error) => {
                     eprintln!("set_fan_rpm failed: {error:?}");
@@ -1125,11 +1178,12 @@ impl DeviceManager {
         state
     }
 
-    /// The fixed fan target currently under tachometer monitoring, if any. Used
-    /// by the thermal monitor thread to decide whether a verification cycle is due.
-    pub fn thermal_manual_target(&mut self) -> Option<thermal::FanRpm> {
+    /// The fixed fan target under tachometer monitoring and its apply generation,
+    /// if any. Used by the thermal monitor thread to decide whether a verification
+    /// cycle is due and to restart the settle window on a fresh re-apply.
+    pub fn thermal_manual_watch(&mut self) -> Option<thermal::ManualWatch> {
         match self.get_device() {
-            Some(laptop) => laptop.thermal_manual_target(),
+            Some(laptop) => laptop.thermal_manual_watch(),
             None => None,
         }
     }
@@ -1394,6 +1448,10 @@ pub struct RazerLaptop {
     // Live thermal-safety posture. Only ever leaves Preflight for the Blade 16
     // 2025; other models stay in a posture that permits their legacy writes.
     thermal_safety: thermal::ThermalSafetyState,
+    // Bumped on every fixed-fan apply (including a same-value re-apply), so the
+    // monitor restarts its settle window on a wake re-latch instead of tripping
+    // failback on spin-up-time tachometer samples.
+    fan_apply_generation: u64,
 }
 //
 impl RazerLaptop {
@@ -1438,6 +1496,7 @@ impl RazerLaptop {
             screensaver: false,
             transaction_id: 0,
             thermal_safety: thermal::ThermalSafetyState::Preflight,
+            fan_apply_generation: 0,
         };
     }
 
@@ -1478,7 +1537,7 @@ impl RazerLaptop {
             self.set_logo_led_state(0);
         }
         self.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost)?;
-        self.set_fan_rpm(config.fan_rpm as u16)?;
+        self.set_fan_rpm(config.fan_rpm)?;
         Ok(())
     }
 
@@ -1735,6 +1794,13 @@ impl RazerLaptop {
         if !thermal::is_mode_selectable(source, mode) {
             return Err(ThermalError::Policy(thermal::ThermalPolicyError::ModeNotSelectable { mode, source }));
         }
+        // Validate the custom levels before any 0x02 mode write, so a rejected
+        // level never latches Custom on the EC and strands stale boost levels.
+        let custom_levels: Option<(u8, u8)> = if mode == thermal::PerformanceMode::Custom {
+            Some((thermal::validate_custom_level(cpu_boost)?, thermal::validate_custom_level(gpu_boost)?))
+        } else {
+            None
+        };
         self.power = mode_byte;
         // A fixed fan speed already stored keeps the manual flag set while the
         // mode is re-written, so the mode change does not silently release it.
@@ -1753,9 +1819,7 @@ impl RazerLaptop {
                 });
             }
         }
-        if mode == thermal::PerformanceMode::Custom {
-            let cpu_level: u8 = thermal::validate_custom_level(cpu_boost)?;
-            let gpu_level: u8 = thermal::validate_custom_level(gpu_boost)?;
+        if let Some((cpu_level, gpu_level)) = custom_levels {
             for (fan, level) in [(thermal::FanId::Cpu, cpu_level), (thermal::FanId::Gpu, gpu_level)] {
                 self.send_thermal(&thermal::set_boost(fan, level))?;
             }
@@ -1777,14 +1841,14 @@ impl RazerLaptop {
     /// Apply a fan speed. The Blade 16 2025 goes through the verified profile-1
     /// sequence and arms tachometer monitoring for a fixed speed; other models
     /// keep the legacy profile-0 path unchanged.
-    pub fn set_fan_rpm(&mut self, value: u16) -> Result<(), ThermalError> {
+    pub fn set_fan_rpm(&mut self, value: i32) -> Result<(), ThermalError> {
         if self.pid == thermal::BLADE_16_2025_PID {
             if self.thermal_safety.writes_disabled() {
                 return Err(ThermalError::WritesDisabled);
             }
             return self.apply_fan_verified(value);
         }
-        Ok(self.set_fan_rpm_legacy(value)?)
+        Ok(self.set_fan_rpm_legacy(value as u16)?)
     }
 
     fn set_fan_rpm_legacy(&mut self, value: u16) -> Result<(), TransportError> {
@@ -1804,7 +1868,7 @@ impl RazerLaptop {
     }
 
     /// Verified fan application (Blade 16 2025), retried once on failure.
-    fn apply_fan_verified(&mut self, value: u16) -> Result<(), ThermalError> {
+    fn apply_fan_verified(&mut self, value: i32) -> Result<(), ThermalError> {
         match self.apply_fan_once(value) {
             Ok(()) => Ok(()),
             Err(first) => {
@@ -1814,9 +1878,9 @@ impl RazerLaptop {
         }
     }
 
-    fn apply_fan_once(&mut self, value: u16) -> Result<(), ThermalError> {
+    fn apply_fan_once(&mut self, value: i32) -> Result<(), ThermalError> {
         let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(self.power)?;
-        match thermal::validate_fixed_rpm(mode, i32::from(value))? {
+        match thermal::validate_fixed_rpm(mode, value)? {
             None => {
                 for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
                     self.send_thermal(&thermal::set_fan_mode(fan, mode, false))?;
@@ -1853,15 +1917,23 @@ impl RazerLaptop {
                     target: thermal::FanRpm(commanded_rpm),
                     consecutive_failures: 0,
                 };
+                // A fresh apply (even of the same target) advances the generation
+                // so the monitor restarts its settle window and does not count
+                // spin-up-time samples toward failback.
+                self.fan_apply_generation = self.fan_apply_generation.wrapping_add(1);
                 Ok(())
             }
         }
     }
 
-    /// The fixed fan target currently under tachometer monitoring, if any.
-    pub fn thermal_manual_target(&self) -> Option<thermal::FanRpm> {
+    /// The fixed fan target currently under tachometer monitoring and the apply
+    /// generation that last armed it, if any. The generation lets the monitor
+    /// restart its settle window on a fresh re-apply of the same value.
+    pub fn thermal_manual_watch(&self) -> Option<thermal::ManualWatch> {
         match self.thermal_safety {
-            thermal::ThermalSafetyState::Manual { target, .. } => Some(target),
+            thermal::ThermalSafetyState::Manual { target, .. } => {
+                Some(thermal::ManualWatch { target, generation: self.fan_apply_generation })
+            }
             _ => None,
         }
     }
@@ -2454,6 +2526,18 @@ mod tests {
         let mut packet = RazerPacket::new(command_class, command_id, 0x00);
         packet.status = status;
         packet
+    }
+
+    #[test]
+    fn aliasing_fan_rpm_is_rejected_before_truncation() {
+        // 68936 as u16 truncates to 3400, a valid Balanced RPM, so the raw i32
+        // must be range-checked before any cast or the alias would pass.
+        assert_eq!(68936_i32 as u16, 3400);
+        assert!(matches!(
+            validate_fan_request(thermal::PerformanceMode::Balanced.wire_value(), 68936),
+            Err(thermal::ThermalPolicyError::RpmOutOfRange { .. })
+        ));
+        assert!(validate_fan_request(thermal::PerformanceMode::Balanced.wire_value(), 3400).is_ok());
     }
 
     #[test]
