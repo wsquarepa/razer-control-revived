@@ -50,8 +50,21 @@ PlasmoidItem {
     // ac state helper for writes
     property string acState: acPower === "1" ? "ac" : "bat"
 
-    // Fan RPM presets for cycling
-    property var fanPresets: [0, 3000, 3500, 4000, 4500, 5000]
+    // Blade 16 2025 profile and fan-preset model. availableProfiles() lists the
+    // wire values the SKU offers on the current power source; fanPresets() gives
+    // the cycling RPM steps (Auto plus four provisional points) for the active
+    // profile. Neither Hyperboost (7) nor Extreme is exposed.
+    function availableProfiles() {
+        return root.acState === "ac" ? [0, 5, 2, 4] : [0, 3]
+    }
+    function fanPresets() {
+        switch (parseInt(root.powerProfile)) {
+        case 0: case 5: return [0, 3400, 4000, 4600, 5200]
+        case 2: case 3: return [0, 3300, 4000, 4700, 5400]
+        case 4: return [0, 4000, 4400, 4900, 5300]
+        default: return [0]
+        }
+    }
 
     // --- Update checker ---
     readonly property string currentVersion: "0.3.0-rc1"
@@ -409,8 +422,10 @@ PlasmoidItem {
                         hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             root._lastWriteTime = Date.now();
+                            var profiles = root.availableProfiles();
                             var cur = parseInt(root.powerProfile);
-                            var next = isNaN(cur) ? 0 : (cur + 1) % 4;
+                            var idx = profiles.indexOf(cur);
+                            var next = profiles[(idx + 1) % profiles.length];
                             executable.exec("razer-cli write power " + root.acState + " " + next);
                             root.powerProfile = next.toString();
                             refreshTimer.restart();
@@ -425,7 +440,7 @@ PlasmoidItem {
                             QQC2.Label { text: "Profile"; font.weight: Font.DemiBold; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
                             Item { Layout.fillWidth: true }
                             QQC2.Label {
-                                text: { switch(powerProfile) { case "0": return "Balanced"; case "1": return "Gaming"; case "2": return "Creator"; case "3": return "Silent"; case "4": return "Custom"; default: return "--"; } }
+                                text: { switch(powerProfile) { case "0": return "Balanced"; case "2": return "Maximum Performance"; case "3": return "Battery Saver"; case "4": return "Custom"; case "5": return "Silent"; default: return "--"; } }
                                 font.bold: true; font.pixelSize: Kirigami.Theme.smallFont.pixelSize; color: Kirigami.Theme.positiveTextColor
                             }
                             Kirigami.Icon { source: "go-next-symbolic"; Layout.preferredWidth: 12; Layout.preferredHeight: 12; opacity: 0.4 }
@@ -442,16 +457,17 @@ PlasmoidItem {
                         hoverEnabled: true; cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             root._lastWriteTime = Date.now();
+                            var presets = root.fanPresets();
                             var cur = parseInt(root.fanSpeed);
                             var idx = 0;
                             if (!isNaN(cur)) {
-                                for (var i = 0; i < root.fanPresets.length; i++) {
-                                    if (root.fanPresets[i] === cur) { idx = i; break; }
+                                for (var i = 0; i < presets.length; i++) {
+                                    if (presets[i] === cur) { idx = i; break; }
                                 }
                             }
-                            var next = (idx + 1) % root.fanPresets.length;
-                            executable.exec("razer-cli write fan " + root.acState + " " + root.fanPresets[next]);
-                            root.fanSpeed = root.fanPresets[next].toString();
+                            var next = (idx + 1) % presets.length;
+                            executable.exec("razer-cli write fan " + root.acState + " " + presets[next]);
+                            root.fanSpeed = presets[next].toString();
                             refreshTimer.restart();
                         }
                         Rectangle {

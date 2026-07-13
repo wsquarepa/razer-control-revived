@@ -726,8 +726,8 @@ pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::Daemon
                     }
                 );
             }
-            comms::DaemonCommand::GetActualFanRpm => {
-                Some(comms::DaemonResponse::GetActualFanRpm { rpm: d.get_actual_fan_rpm() })
+            comms::DaemonCommand::GetThermalStatus => {
+                Some(comms::DaemonResponse::GetThermalStatus { status: d.thermal_status() })
             },
             comms::DaemonCommand::GetDeviceName => {
                 let name = match &d.device {

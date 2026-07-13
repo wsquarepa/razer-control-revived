@@ -8,6 +8,7 @@ use crate::dbus_mutter_idlemonitor;
 use crate::config;
 use crate::battery;
 use crate::thermal;
+use crate::comms;
 use dbus::blocking::Connection;
 
 const RAZER_VENDOR_ID: u16 = 0x1532;
@@ -211,6 +212,47 @@ fn thermal_failure_class(error: &ThermalError) -> thermal::ThermalFailure {
     match error {
         ThermalError::Decode(_) => thermal::ThermalFailure::ReadbackMismatch,
         _ => thermal::ThermalFailure::Transport,
+    }
+}
+
+/// A human-actionable reason for a thermal failure. Policy failures already have
+/// a Display that names why (mode not selectable, RPM out of range, Extreme
+/// gated); other classes fall back to their debug form, which carries the full
+/// transport/decode context.
+fn thermal_error_reason(error: &ThermalError) -> String {
+    match error {
+        ThermalError::Policy(policy) => policy.to_string(),
+        ThermalError::WritesDisabled => {
+            "thermal safety is disabled; fan and power writes are refused".to_string()
+        }
+        ThermalError::ReadbackMismatch { command_id, requested, observed } => format!(
+            "readback for command {command_id:#x} returned {observed} but {requested} was written"
+        ),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Project a verified-apply/telemetry failure onto the typed IPC failure DTO.
+fn thermal_failure_dto(error: &ThermalError) -> comms::ThermalFailureDto {
+    let code = match error {
+        ThermalError::Decode(_) | ThermalError::ReadbackMismatch { .. } => {
+            comms::ThermalFailureCode::ReadbackMismatch
+        }
+        ThermalError::Policy(_) => comms::ThermalFailureCode::Policy,
+        ThermalError::WritesDisabled => comms::ThermalFailureCode::WritesDisabled,
+        ThermalError::Transport(_) => comms::ThermalFailureCode::Transport,
+    };
+    comms::ThermalFailureDto { code, message: thermal_error_reason(error) }
+}
+
+/// Project the daemon's internal safety posture onto the frontend DTO, dropping
+/// the target RPM and failure counter a frontend does not consume.
+fn safety_state_dto(state: thermal::ThermalSafetyState) -> comms::ThermalSafetyStateDto {
+    match state {
+        thermal::ThermalSafetyState::Preflight => comms::ThermalSafetyStateDto::Preflight,
+        thermal::ThermalSafetyState::Ready => comms::ThermalSafetyStateDto::Ready,
+        thermal::ThermalSafetyState::Manual { .. } => comms::ThermalSafetyStateDto::Manual,
+        thermal::ThermalSafetyState::Disabled => comms::ThermalSafetyStateDto::Disabled,
     }
 }
 
@@ -684,8 +726,7 @@ impl DeviceManager {
         }
     }
 
-    pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> bool {
-        let mut res: bool = false;
+    pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> comms::CommandResult {
         if let Some(config) = self.get_config() {
             config.power[ac].power_mode = pwr;
             config.power[ac].cpu_boost = cpu;
@@ -695,21 +736,20 @@ impl DeviceManager {
             }
         }
         if let Some(laptop) = self.get_device() {
-            let state = laptop.get_ac_state();
-            if state != ac {
-                res = true;
-            } else {
-                res = match laptop.set_power_mode(pwr, cpu, gpu) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        eprintln!("set_power_mode failed: {error:?}");
-                        false
-                    }
-                };
+            // Writing the inactive profile only stores config; there is nothing to
+            // apply to hardware until that profile becomes active.
+            if laptop.get_ac_state() != ac {
+                return comms::CommandResult::Applied;
             }
+            return match laptop.set_power_mode(pwr, cpu, gpu) {
+                Ok(()) => comms::CommandResult::Applied,
+                Err(error) => {
+                    eprintln!("set_power_mode failed: {error:?}");
+                    comms::CommandResult::Rejected { reason: thermal_error_reason(&error) }
+                }
+            };
         }
-
-        return res;
+        comms::CommandResult::Rejected { reason: "no supported device present".to_string() }
     }
 
     pub fn get_standard_effect(&mut self) -> (u8, Vec<u8>) {
@@ -744,8 +784,7 @@ impl DeviceManager {
         return true;
     }
 
-    pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> bool {
-        let mut res: bool = false;
+    pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> comms::CommandResult {
         if let Some(config) = self.get_config() {
             config.power[ac].fan_rpm = rpm;
             if let Err(e) = config.write_to_file() {
@@ -754,21 +793,20 @@ impl DeviceManager {
         }
 
         if let Some(laptop) = self.get_device() {
-            let state = laptop.get_ac_state();
-            if state != ac {
-                res = true;
-            } else {
-                res = match laptop.set_fan_rpm(rpm as u16) {
-                    Ok(()) => true,
-                    Err(error) => {
-                        eprintln!("set_fan_rpm failed: {error:?}");
-                        false
-                    }
-                };
+            // Writing the inactive profile only stores config; there is nothing to
+            // apply to hardware until that profile becomes active.
+            if laptop.get_ac_state() != ac {
+                return comms::CommandResult::Applied;
             }
+            return match laptop.set_fan_rpm(rpm as u16) {
+                Ok(()) => comms::CommandResult::Applied,
+                Err(error) => {
+                    eprintln!("set_fan_rpm failed: {error:?}");
+                    comms::CommandResult::Rejected { reason: thermal_error_reason(&error) }
+                }
+            };
         }
-
-        return res;
+        comms::CommandResult::Rejected { reason: "no supported device present".to_string() }
     }
 
     pub fn set_logo_led_state(&mut self, ac:usize, logo_state: u8) -> bool {
@@ -857,35 +895,88 @@ impl DeviceManager {
         return 0
     }
 
-    pub fn get_actual_fan_rpm(&mut self) -> i32 {
-        // IPC boundary: convert to the legacy i32 until Task 9 exposes a typed
-        // status. The typed error is logged here and never silently defaulted;
-        // Task 9 removes this zero-on-failure conversion.
-        let pid: u16 = match self.get_device() {
-            Some(laptop) => laptop.pid(),
-            None => return 0,
-        };
-        if let Some(laptop) = self.get_device() {
-            if pid == thermal::BLADE_16_2025_PID {
-                // The Blade 16 2025 exposes a live tachometer (0x88); read the CPU
-                // zone as the representative fan speed.
-                match laptop.read_current_fan_rpm(thermal::FanId::Cpu) {
-                    Ok(rpm) => return i32::from(rpm.0),
-                    Err(error) => {
-                        eprintln!("get_actual_fan_rpm: tachometer read failed: {error:?}");
-                        return 0;
-                    }
-                }
+    /// The typed live thermal status carried over IPC. A failed tachometer read
+    /// surfaces `error` and leaves the rpm fields unspecified: it never converts a
+    /// transport failure into a valid zero reading (the old i32 zero sentinel is
+    /// gone from this path).
+    pub fn thermal_status(&mut self) -> comms::ThermalStatus {
+        let (ac, is_2025, safety) = match self.get_device() {
+            Some(laptop) => (
+                laptop.get_ac_state(),
+                laptop.pid() == thermal::BLADE_16_2025_PID,
+                laptop.thermal_safety(),
+            ),
+            None => {
+                return comms::ThermalStatus {
+                    safety_state: comms::ThermalSafetyStateDto::Disabled,
+                    performance_mode: 0,
+                    fan_mode: comms::FanControlModeDto::Automatic,
+                    cpu_rpm: 0,
+                    gpu_rpm: 0,
+                    error: Some(comms::ThermalFailureDto {
+                        code: comms::ThermalFailureCode::Transport,
+                        message: "no supported device present".to_string(),
+                    }),
+                };
             }
-            match laptop.read_fan_rpm_from_ec() {
-                Ok(rpm) => return rpm as i32,
-                Err(error) => {
-                    eprintln!("get_actual_fan_rpm: EC read failed: {error:?}");
-                    return 0;
+        };
+        let (performance_mode, fan_mode) = match self.get_ac_config(ac) {
+            Some(config) => (
+                config.power_mode,
+                if config.fan_rpm == 0 {
+                    comms::FanControlModeDto::Automatic
+                } else {
+                    comms::FanControlModeDto::Fixed
+                },
+            ),
+            None => (0, comms::FanControlModeDto::Automatic),
+        };
+        let safety_state: comms::ThermalSafetyStateDto = safety_state_dto(safety);
+        match self.read_zone_rpms(is_2025) {
+            Ok((cpu_rpm, gpu_rpm)) => comms::ThermalStatus {
+                safety_state,
+                performance_mode,
+                fan_mode,
+                cpu_rpm,
+                gpu_rpm,
+                error: None,
+            },
+            Err(error) => {
+                eprintln!("thermal_status: fan telemetry read failed: {error:?}");
+                comms::ThermalStatus {
+                    safety_state,
+                    performance_mode,
+                    fan_mode,
+                    cpu_rpm: 0,
+                    gpu_rpm: 0,
+                    error: Some(thermal_failure_dto(&error)),
                 }
             }
         }
-        return 0;
+    }
+
+    /// Read both fan zones' current tachometer RPM. The Blade 16 2025 exposes a
+    /// per-zone live tachometer (0x88); other models report a single EC fan speed,
+    /// mirrored to both zones. A transport failure is propagated, never defaulted.
+    fn read_zone_rpms(&mut self, is_2025: bool) -> Result<(u16, u16), ThermalError> {
+        match self.get_device() {
+            Some(laptop) if is_2025 => {
+                let cpu: thermal::FanRpm = laptop.read_current_fan_rpm(thermal::FanId::Cpu)?;
+                let gpu: thermal::FanRpm = laptop.read_current_fan_rpm(thermal::FanId::Gpu)?;
+                Ok((cpu.0, gpu.0))
+            }
+            Some(laptop) => {
+                let rpm: u16 = laptop.read_fan_rpm_from_ec()?;
+                Ok((rpm, rpm))
+            }
+            None => Err(ThermalError::Transport(TransportError::Read {
+                pid: 0,
+                transaction_id: 0,
+                command_class: THERMAL_COMMAND_CLASS,
+                command_id: 0x88,
+                detail: "no supported device present".to_string(),
+            })),
+        }
     }
 
     pub fn get_fan_rpm(&mut self, ac: usize) -> i32 {

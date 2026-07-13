@@ -595,12 +595,36 @@ fn read_fan_rpm(ac: usize) {
 }
 
 fn read_actual_fan_rpm() {
-    match send_data(comms::DaemonCommand::GetActualFanRpm) {
-        Some(comms::DaemonResponse::GetActualFanRpm { rpm }) => {
-            println!("{}", rpm);
-        },
+    match send_data(comms::DaemonCommand::GetThermalStatus) {
+        Some(comms::DaemonResponse::GetThermalStatus { status }) => print_thermal_status(&status),
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
+    }
+}
+
+fn print_thermal_status(status: &comms::ThermalStatus) {
+    let safety: &str = match status.safety_state {
+        comms::ThermalSafetyStateDto::Preflight => "Preflight",
+        comms::ThermalSafetyStateDto::Ready => "Ready",
+        comms::ThermalSafetyStateDto::Manual => "Manual",
+        comms::ThermalSafetyStateDto::Disabled => "Disabled",
+    };
+    let fan_mode: &str = match status.fan_mode {
+        comms::FanControlModeDto::Automatic => "Automatic",
+        comms::FanControlModeDto::Fixed => "Fixed",
+    };
+    println!("Thermal safety: {}", safety);
+    println!("Power mode: {}", comms::performance_mode_display(status.performance_mode));
+    println!("Fan mode: {}", fan_mode);
+    // rpm fields are meaningful only when no error is present.
+    match &status.error {
+        None => {
+            println!("CPU fan: {} RPM", status.cpu_rpm);
+            println!("GPU fan: {} RPM", status.gpu_rpm);
+        }
+        Some(error) => {
+            eprintln!("Fan telemetry unavailable: {}", error.message);
+        }
     }
 }
 
@@ -620,41 +644,31 @@ fn read_logo_mode(ac: usize) {
     }
 }
 
+/// Custom CPU/GPU boost level label. Only Low/Medium/High are valid on this SKU;
+/// level 3 (Extreme) is gated and is never presented as a real level.
+fn boost_level_label(level: u8) -> &'static str {
+    match level {
+        0 => "Low",
+        1 => "Medium",
+        2 => "High",
+        _ => "Unknown",
+    }
+}
+
 fn read_power_mode(ac: usize) {
     if let Some(resp) = send_data(comms::DaemonCommand::GetPwrLevel { ac }) {
         if let comms::DaemonResponse::GetPwrLevel { pwr } = resp {
-            let power_desc: &str = match pwr {
-                0 => "Balanced",
-                1 => "Gaming",
-                2 => "Creator",
-                3 => "Silent",
-                4 => "Custom",
-                _ => "Unknown",
-            };
-            println!("Current power setting: {}", power_desc);
+            // Stable KDE-widget contract: `Name (N)` with the wire number in parens.
+            println!("Current power setting: {}", comms::performance_mode_display(pwr));
             if pwr == 4 {
                 if let Some(resp) = send_data(comms::DaemonCommand::GetCPUBoost { ac }) {
                     if let comms::DaemonResponse::GetCPUBoost { cpu } = resp {
-                        let cpu_boost_desc: &str = match cpu {
-                            0 => "Low",
-                            1 => "Medium",
-                            2 => "High",
-                            3 => "Boost",
-                            _ => "Unknown",
-                        };
-                        println!("Current CPU setting: {}", cpu_boost_desc);
+                        println!("Current CPU setting: {}", boost_level_label(cpu));
                     };
                 }
                 if let Some(resp) = send_data(comms::DaemonCommand::GetGPUBoost { ac }) {
                     if let comms::DaemonResponse::GetGPUBoost { gpu } = resp {
-                        let gpu_boost_desc: &str = match gpu {
-                            0 => "Low",
-                            1 => "Medium",
-                            2 => "High",
-                            3 => "Extreme",
-                            _ => "Unknown",
-                        };
-                        println!("Current GPU setting: {}", gpu_boost_desc);
+                        println!("Current GPU setting: {}", boost_level_label(gpu));
                     };
                 }
             }
@@ -665,35 +679,30 @@ fn read_power_mode(ac: usize) {
 }
 
 fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Option<u8>) {
-    if pwr_mode > 4 {
+    if pwr_mode == 7 {
         Cli::command()
-            .error(ErrorKind::InvalidValue, "Power mode must be 0, 1, 2, 3 or 4")
+            .error(
+                ErrorKind::InvalidValue,
+                "Hyperboost (mode 7) is not validated on this unit and is disabled",
+            )
+            .exit()
+    }
+    if !matches!(pwr_mode, 0 | 2 | 3 | 4 | 5) {
+        Cli::command()
+            .error(
+                ErrorKind::InvalidValue,
+                "Power mode must be 0 (Balanced), 2 (Maximum Performance), 3 (Battery Saver), 4 (Custom) or 5 (Silent)",
+            )
             .exit()
     }
 
-    let cm = if pwr_mode == 4 {
-        cpu_mode.expect("CPU mode must be provided when power mode is 4")
-    } else {
-        cpu_mode.unwrap_or(0)
-    };
+    // Custom mode without explicit levels defaults to Low/Low so a quick profile
+    // toggle (e.g. the panel widget) never needs to pass boost arguments.
+    let cm = cpu_mode.unwrap_or(0);
+    validate_boost_level(cm, "CPU");
 
-    if cm > 3 {
-        Cli::command()
-            .error(ErrorKind::InvalidValue, "CPU mode must be between 0 and 3")
-            .exit()
-    }
-
-    let gm = if pwr_mode == 4 {
-        gpu_mode.expect("GPU mode must be provided when power mode is 4")
-    } else {
-        gpu_mode.unwrap_or(0)
-    };
-
-    if gm > 3 {
-        Cli::command()
-            .error(ErrorKind::InvalidValue, "GPU mode must be between 0 and 3")
-            .exit()
-    }
+    let gm = gpu_mode.unwrap_or(0);
+    validate_boost_level(gm, "GPU");
 
     match send_data(comms::DaemonCommand::SetPowerMode {
         ac,
@@ -701,7 +710,8 @@ fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Optio
         cpu: cm,
         gpu: gm,
     }) {
-        Some(_) => read_power_mode(ac),
+        Some(comms::DaemonResponse::SetPowerMode { result }) => report_command_result(result, || read_power_mode(ac)),
+        Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => {
             Cli::command()
                 .error(
@@ -710,6 +720,36 @@ fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Optio
                 )
                 .exit()
         },
+    }
+}
+
+/// Reject a custom boost level the UI must not offer. Low/Medium/High (0-2) pass;
+/// level 3 (Extreme) is gated on this unit; anything higher is not a level.
+fn validate_boost_level(level: u8, zone: &str) {
+    if level == 3 {
+        Cli::command()
+            .error(
+                ErrorKind::InvalidValue,
+                format!("{zone} level 3 (Extreme) is not validated on this unit and is disabled"),
+            )
+            .exit()
+    }
+    if level > 3 {
+        Cli::command()
+            .error(
+                ErrorKind::InvalidValue,
+                format!("{zone} level must be 0 (Low), 1 (Medium) or 2 (High)"),
+            )
+            .exit()
+    }
+}
+
+/// Surface a setter outcome: run `on_applied` when the daemon applied the write,
+/// otherwise print the daemon's rejection reason.
+fn report_command_result<F: FnOnce()>(result: comms::CommandResult, on_applied: F) {
+    match result {
+        comms::CommandResult::Applied => on_applied(),
+        comms::CommandResult::Rejected { reason } => eprintln!("Command rejected: {reason}"),
     }
 }
 
@@ -742,7 +782,8 @@ fn write_brightness(ac: usize, val: u8) {
 
 fn write_fan_speed(ac: usize, x: i32) {
     match send_data(comms::DaemonCommand::SetFanSpeed { ac, rpm: x }) {
-        Some(_) => read_fan_rpm(ac),
+        Some(comms::DaemonResponse::SetFanSpeed { result }) => report_command_result(result, || read_fan_rpm(ac)),
+        Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown error!"),
     }
 }

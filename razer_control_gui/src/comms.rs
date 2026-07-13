@@ -24,6 +24,109 @@ pub struct GpuInfo {
     pub runtime_status: String,
 }
 
+/// The class of a thermal failure, carried over IPC without the daemon's full
+/// transport/decode detail (that stays in the daemon log). Enough for a frontend
+/// to explain why a reading or a write did not succeed.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum ThermalFailureCode {
+    /// A command did not complete over the HID transport.
+    Transport,
+    /// A readback decoded for its own zone but did not match what was requested.
+    ReadbackMismatch,
+    /// A request was rejected by thermal policy (mode/level/RPM not allowed).
+    Policy,
+    /// The safety state machine is Disabled, so every write is refused.
+    WritesDisabled,
+}
+
+/// A typed thermal failure delivered to a frontend: a machine-readable class and
+/// a human-readable message with the debugging context already interpolated.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ThermalFailureDto {
+    pub code: ThermalFailureCode,
+    pub message: String,
+}
+
+/// The daemon's live thermal-safety posture, projected for a frontend. The
+/// `Manual` variant intentionally drops the target RPM and failure counter the
+/// daemon tracks internally: a frontend only needs the posture, not the counter.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalSafetyStateDto {
+    Preflight,
+    Ready,
+    Manual,
+    Disabled,
+}
+
+/// Whether the fans run under firmware-automatic control or a fixed manual speed.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanControlModeDto {
+    Automatic,
+    Fixed,
+}
+
+/// Live thermal telemetry for a frontend.
+///
+/// `cpu_rpm` and `gpu_rpm` are meaningful only when `error` is `None`. A failed
+/// tachometer read or transport failure sets `error` and leaves the rpm fields
+/// unspecified; they are never a real zero passed off as a valid reading (that
+/// legacy zero-on-failure sentinel is gone from the typed path).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ThermalStatus {
+    pub safety_state: ThermalSafetyStateDto,
+    pub performance_mode: u8,
+    pub fan_mode: FanControlModeDto,
+    pub cpu_rpm: u16,
+    pub gpu_rpm: u16,
+    pub error: Option<ThermalFailureDto>,
+}
+
+/// The outcome of a thermal setter (power mode or fan speed). A rejection carries
+/// the reason so the frontend can surface why the write was refused instead of a
+/// bare boolean.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum CommandResult {
+    Applied,
+    Rejected { reason: String },
+}
+
+/// Blade 16 2025 performance-mode display name for a wire value. Only the modes
+/// this SKU offers have names; recognized-but-gated Hyperboost (7) and every
+/// unrecognized value are "Unknown". No pre-2025 label taxonomy is used here.
+#[allow(dead_code)]
+pub fn performance_mode_label(wire_mode: u8) -> &'static str {
+    match wire_mode {
+        0 => "Balanced",
+        2 => "Maximum Performance",
+        3 => "Battery Saver",
+        4 => "Custom",
+        5 => "Silent",
+        _ => "Unknown",
+    }
+}
+
+/// The stable KDE-widget contract rendering `Name (N)`: the trailing wire number
+/// in parentheses is what the widget parses, so it must never be dropped.
+#[allow(dead_code)]
+pub fn performance_mode_display(wire_mode: u8) -> String {
+    format!("{} ({})", performance_mode_label(wire_mode), wire_mode)
+}
+
+/// Provisional `(min, max)` fan RPM bounds for a Blade 16 2025 performance mode,
+/// used only to bound the manual fan slider in a frontend. These mirror the
+/// daemon's `thermal::provisional_rpm_range`; the daemon re-validates every fan
+/// write against the same policy, so a stale UI bound can never cause an
+/// out-of-range write. Unknown modes fall back to the widest common bound.
+#[allow(dead_code)]
+pub fn provisional_rpm_range(wire_mode: u8) -> (u16, u16) {
+    match wire_mode {
+        0 | 5 => (3400, 5200),
+        2 | 3 => (3300, 5400),
+        4 => (4000, 5300),
+        _ => (3300, 5400),
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 /// Represents data sent TO the daemon
 pub enum DaemonCommand {
@@ -46,7 +149,7 @@ pub enum DaemonCommand {
     SetBatteryHealthOptimizer { is_on: bool, threshold: u8 },
     GetBatteryHealthOptimizer (),
     GetDeviceName,
-    GetActualFanRpm,
+    GetThermalStatus,
     GetStandardEffect,
     GetGpuStatus,
     SetDgpuRuntimePM { enabled: bool },
@@ -57,9 +160,9 @@ pub enum DaemonCommand {
 /// Represents data sent back from Daemon after it receives
 /// a command.
 pub enum DaemonResponse {
-    SetFanSpeed { result: bool },                    // Response
+    SetFanSpeed { result: CommandResult },           // Response
     GetFanSpeed { rpm: i32 },                        // Get (Fan speed)
-    SetPowerMode { result: bool },                   // Response
+    SetPowerMode { result: CommandResult },          // Response
     GetPwrLevel { pwr: u8 },                         // Get (Power mode)
     GetCPUBoost { cpu: u8 },                         // Get (CPU boost)
     GetGPUBoost { gpu: u8 },                         // Get (GPU boost)
@@ -76,7 +179,7 @@ pub enum DaemonResponse {
     SetBatteryHealthOptimizer { result: bool },
     GetBatteryHealthOptimizer { is_on: bool, threshold: u8 },
     GetDeviceName { name: String },
-    GetActualFanRpm { rpm: i32 },
+    GetThermalStatus { status: ThermalStatus },
     GetStandardEffect { effect: u8, params: Vec<u8> },
     GetGpuStatus {
         gpus: Vec<GpuInfo>,
@@ -191,5 +294,115 @@ pub fn read_from_socket_req(bytes: &[u8]) -> Option<DaemonCommand> {
             println!("REQ ERROR: {}", e);
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip<T>(value: &T) -> T
+    where
+        T: Serialize + serde::de::DeserializeOwned,
+    {
+        let bytes: Vec<u8> = bincode::serialize(value).expect("serialize");
+        bincode::deserialize::<T>(&bytes).expect("deserialize")
+    }
+
+    #[test]
+    fn thermal_status_round_trips_when_reading_succeeded() {
+        let status: ThermalStatus = ThermalStatus {
+            safety_state: ThermalSafetyStateDto::Manual,
+            performance_mode: 2,
+            fan_mode: FanControlModeDto::Fixed,
+            cpu_rpm: 4200,
+            gpu_rpm: 4600,
+            error: None,
+        };
+        assert_eq!(round_trip(&status), status);
+    }
+
+    #[test]
+    fn thermal_status_round_trips_when_reading_failed() {
+        let status: ThermalStatus = ThermalStatus {
+            safety_state: ThermalSafetyStateDto::Disabled,
+            performance_mode: 0,
+            fan_mode: FanControlModeDto::Automatic,
+            cpu_rpm: 0,
+            gpu_rpm: 0,
+            error: Some(ThermalFailureDto {
+                code: ThermalFailureCode::Transport,
+                message: "tachometer read failed".to_string(),
+            }),
+        };
+        assert_eq!(round_trip(&status), status);
+    }
+
+    #[test]
+    fn thermal_failure_dto_round_trips_for_every_code() {
+        for code in [
+            ThermalFailureCode::Transport,
+            ThermalFailureCode::ReadbackMismatch,
+            ThermalFailureCode::Policy,
+            ThermalFailureCode::WritesDisabled,
+        ] {
+            let dto: ThermalFailureDto =
+                ThermalFailureDto { code: code.clone(), message: "context".to_string() };
+            assert_eq!(round_trip(&dto), dto);
+        }
+    }
+
+    #[test]
+    fn safety_state_dto_round_trips_for_every_variant() {
+        for state in [
+            ThermalSafetyStateDto::Preflight,
+            ThermalSafetyStateDto::Ready,
+            ThermalSafetyStateDto::Manual,
+            ThermalSafetyStateDto::Disabled,
+        ] {
+            assert_eq!(round_trip(&state), state);
+        }
+    }
+
+    #[test]
+    fn fan_control_mode_dto_round_trips_for_every_variant() {
+        for mode in [FanControlModeDto::Automatic, FanControlModeDto::Fixed] {
+            assert_eq!(round_trip(&mode), mode);
+        }
+    }
+
+    #[test]
+    fn command_result_round_trips_for_both_outcomes() {
+        let applied: CommandResult = CommandResult::Applied;
+        assert_eq!(round_trip(&applied), applied);
+        let rejected: CommandResult =
+            CommandResult::Rejected { reason: "mode not selectable".to_string() };
+        assert_eq!(round_trip(&rejected), rejected);
+    }
+
+    #[test]
+    fn formats_every_2025_mode_with_a_stable_numeric_suffix() {
+        assert_eq!(performance_mode_display(0), "Balanced (0)");
+        assert_eq!(performance_mode_display(2), "Maximum Performance (2)");
+        assert_eq!(performance_mode_display(3), "Battery Saver (3)");
+        assert_eq!(performance_mode_display(4), "Custom (4)");
+        assert_eq!(performance_mode_display(5), "Silent (5)");
+    }
+
+    #[test]
+    fn does_not_expose_hyperboost_or_unknown_modes_by_name() {
+        assert_eq!(performance_mode_label(7), "Unknown");
+        assert_eq!(performance_mode_label(1), "Unknown");
+        assert_eq!(performance_mode_label(6), "Unknown");
+        assert_eq!(performance_mode_display(7), "Unknown (7)");
+    }
+
+    #[test]
+    fn provisional_rpm_range_matches_each_selectable_mode() {
+        assert_eq!(provisional_rpm_range(0), (3400, 5200));
+        assert_eq!(provisional_rpm_range(5), (3400, 5200));
+        assert_eq!(provisional_rpm_range(2), (3300, 5400));
+        assert_eq!(provisional_rpm_range(3), (3300, 5400));
+        assert_eq!(provisional_rpm_range(4), (4000, 5300));
     }
 }

@@ -5,6 +5,7 @@ use adw::prelude::*;
 use std::fs;
 use std::rc::Rc;
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -292,10 +293,21 @@ fn set_power(ac: bool, power: (u8, u8, u8)) -> Option<bool> {
     let response = send_data(comms::DaemonCommand::SetPowerMode { ac, pwr: power.0, cpu: power.1, gpu: power.2 })?;
     use comms::DaemonResponse::*;
     match response {
-        SetPowerMode { result } => Some(result),
+        SetPowerMode { result } => Some(command_applied(result)),
         response => {
             println!("Instead of SetPowerMode got {response:?}");
             None
+        }
+    }
+}
+
+/// Whether a setter outcome applied, logging the daemon's reason when it did not.
+fn command_applied(result: comms::CommandResult) -> bool {
+    match result {
+        comms::CommandResult::Applied => true,
+        comms::CommandResult::Rejected { reason } => {
+            eprintln!("Daemon rejected command: {reason}");
+            false
         }
     }
 }
@@ -318,7 +330,7 @@ fn set_fan_speed(ac: bool, value: i32) -> Option<bool> {
     let response = send_data(comms::DaemonCommand::SetFanSpeed{ ac, rpm: value })?;
     use comms::DaemonResponse::*;
     match response {
-        SetFanSpeed { result } => Some(result),
+        SetFanSpeed { result } => Some(command_applied(result)),
         response => {
             println!("Instead of SetFanSpeed got {response:?}");
             None
@@ -1120,6 +1132,50 @@ fn main() {
 // Performance page
 // ---------------------------------------------------------------------------
 
+/// Whether a supported device is the Blade 16 2025 (PID 0x02C6), which uses the
+/// 2025 performance-mode taxonomy and provisional per-mode fan bounds.
+fn is_blade_16_2025(device: &SupportedDevice) -> bool {
+    device.pid.eq_ignore_ascii_case("02C6")
+}
+
+/// The `(label, wire_value)` power-mode choices for a device on a given power
+/// source. The 2025 SKU offers different modes on AC vs battery, with wire values
+/// that are not sequential (Silent is 5, Maximum Performance is 2), so the combo
+/// index must be mapped through this list; other models keep the legacy
+/// sequential 0..=4 set.
+fn power_mode_choices(device: &SupportedDevice, ac: bool) -> Vec<(&'static str, u8)> {
+    if is_blade_16_2025(device) {
+        if ac {
+            vec![("Balanced", 0), ("Silent", 5), ("Maximum Performance", 2), ("Custom", 4)]
+        } else {
+            vec![("Balanced", 0), ("Battery Saver", 3)]
+        }
+    } else {
+        vec![("Balanced", 0), ("Performance", 1), ("Studio", 2), ("Silent", 3), ("Custom", 4)]
+    }
+}
+
+/// The combo index whose wire value matches `wire`, or 0 when none does.
+fn wire_index(choices: &[(&'static str, u8)], wire: u8) -> u32 {
+    choices.iter().position(|(_, w)| *w == wire).unwrap_or(0) as u32
+}
+
+/// A short description for a performance mode, keyed on the wire value.
+fn mode_description(is_2025: bool, wire: u8) -> &'static str {
+    if is_2025 {
+        match wire {
+            0 => "Good mix of performance and battery life",
+            2 => "Maximum performance, higher power draw",
+            3 => "Extends battery life, reduced performance",
+            4 => "Manually tune CPU and GPU levels",
+            5 => "Minimal noise, reduced performance",
+            _ => "",
+        }
+    } else {
+        profile_description(wire as u32)
+    }
+}
+
 fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     let settings_page = SettingsPage::new();
 
@@ -1135,38 +1191,56 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     let power_section = settings_page.add_section(Some("Power Profile"));
 
     let initial_ac = is_ac.get();
+    let is_2025 = is_blade_16_2025(&device);
     let power = get_power(initial_ac);
+    let initial_wire: u8 = power.map_or(0, |p| p.0);
 
+    // The active `(label, wire)` choices; the combo index is mapped through this
+    // list, and it is rebuilt when the power source changes (the 2025 SKU offers
+    // different modes on AC vs battery).
+    let current_choices: Rc<RefCell<Vec<(&'static str, u8)>>> =
+        Rc::new(RefCell::new(power_mode_choices(&device, initial_ac)));
+    let current_source: Rc<Cell<bool>> = Rc::new(Cell::new(initial_ac));
+
+    let initial_labels: Vec<&str> =
+        current_choices.borrow().iter().map(|(label, _)| *label).collect();
     let power_combo = make_combo_row(
         "Profile",
-        &profile_description(power.map_or(0, |p| p.0 as u32)),
-        &["Balanced", "Gaming", "Creator", "Silent", "Custom"],
-        power.map_or(0, |p| p.0 as u32),
+        mode_description(is_2025, initial_wire),
+        &initial_labels,
+        wire_index(&current_choices.borrow(), initial_wire),
     );
     power_section.add_row(&power_combo);
 
-    let cpu_options: &[&str] = if device.can_boost() {
-        &["Low", "Medium", "High", "Boost"]
-    } else {
+    // Custom levels on this SKU are Low/Medium/High only; level 3 (Boost/Extreme)
+    // is gated, so it is never offered on the 2025 device.
+    let boost_options: &[&str] = if is_2025 || !device.can_boost() {
         &["Low", "Medium", "High"]
+    } else {
+        &["Low", "Medium", "High", "Boost"]
     };
     let cpu_combo = make_combo_row(
         "CPU Performance",
         "Processor performance level",
-        cpu_options,
+        boost_options,
         power.map_or(0, |p| p.1 as u32),
     );
     power_section.add_row(&cpu_combo);
 
+    let gpu_options: &[&str] = if is_2025 {
+        &["Low", "Medium", "High"]
+    } else {
+        &["Low", "Medium", "High", "Extreme"]
+    };
     let gpu_combo = make_combo_row(
         "GPU Performance",
         "Graphics performance level",
-        &["Low", "Medium", "High", "Extreme"],
+        gpu_options,
         power.map_or(0, |p| p.2 as u32),
     );
     power_section.add_row(&gpu_combo);
 
-    let show_boost = power.map_or(false, |p| p.0 == 4);
+    let show_boost = initial_wire == 4;
     cpu_combo.set_visible(show_boost);
     gpu_combo.set_visible(show_boost);
 
@@ -1174,8 +1248,8 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     let fan_section = settings_page.add_section(Some("Cooling"));
 
     let fan_speed = get_fan_speed(initial_ac).unwrap_or(0);
-    let min_fan_speed = *device.fan.get(0).unwrap_or(&0) as f64;
-    let max_fan_speed = *device.fan.get(1).unwrap_or(&5000) as f64;
+    let device_min_fan = *device.fan.get(0).unwrap_or(&0) as f64;
+    let device_max_fan = *device.fan.get(1).unwrap_or(&5000) as f64;
 
     let initial_mode: u32 = if fan_speed == 0 { 0 } else { 1 };
     let mode_combo = make_combo_row(
@@ -1186,16 +1260,41 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     );
     fan_section.add_row(&mode_combo);
 
+    let (initial_min, initial_max) = if is_2025 {
+        let (min, max) = comms::provisional_rpm_range(initial_wire);
+        (min as f64, max as f64)
+    } else {
+        (device_min_fan, device_max_fan)
+    };
     let fan_slider = SliderRow::new(
         "Fan Speed (RPM)",
         "Manual cooling performance",
-        min_fan_speed, max_fan_speed, 100.0,
-        if fan_speed > 0 { fan_speed as f64 } else { min_fan_speed },
+        initial_min, initial_max, 100.0,
+        if fan_speed > 0 { fan_speed as f64 } else { initial_min },
     );
-    fan_slider.add_mark(min_fan_speed, Some("Min"));
-    fan_slider.add_mark(max_fan_speed, Some("Max"));
+    fan_slider.add_mark(initial_min, Some("Min"));
+    fan_slider.add_mark(initial_max, Some("Max"));
     fan_section.add_row(&fan_slider.container);
     fan_slider.container.set_visible(initial_mode == 1);
+
+    // Set the manual-fan slider bounds to the provisional range of a wire mode
+    // (2025) or the device's static fan range (other models). The daemon
+    // re-validates every fan write, so these bounds are advisory only.
+    let set_fan_bounds: Rc<dyn Fn(u8)> = {
+        let fan_scale = fan_slider.scale.clone();
+        Rc::new(move |wire: u8| {
+            let (min, max) = if is_2025 {
+                let (min, max) = comms::provisional_rpm_range(wire);
+                (min as f64, max as f64)
+            } else {
+                (device_min_fan, device_max_fan)
+            };
+            fan_scale.set_range(min, max);
+            fan_scale.clear_marks();
+            fan_scale.add_mark(min, gtk::PositionType::Bottom, Some("Min"));
+            fan_scale.add_mark(max, gtk::PositionType::Bottom, Some("Max"));
+        })
+    };
 
     // --- Callbacks ---
 
@@ -1214,18 +1313,34 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         let fan_container = fan_slider.container.clone();
         let fan_scale = fan_slider.scale.clone();
         let fan_dragging = fan_dragging.clone();
-        let min_fan = min_fan_speed;
+        let current_choices = current_choices.clone();
+        let current_source = current_source.clone();
+        let set_fan_bounds = set_fan_bounds.clone();
+        let device = device.clone();
         Rc::new(move || {
             refreshing.set(true);
             let ac = is_ac.get();
+            // Rebuild the profile list only when the power source changed, so the
+            // periodic refresh never resets the combo model out from under a user.
+            if ac != current_source.get() {
+                let choices = power_mode_choices(&device, ac);
+                let labels: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
+                power_combo.set_model(Some(&gtk::StringList::new(&labels)));
+                *current_choices.borrow_mut() = choices;
+                current_source.set(ac);
+            }
             if let Some(pwr) = get_power(ac) {
-                power_combo.set_selected(pwr.0 as u32);
-                power_combo.set_subtitle(profile_description(pwr.0 as u32));
+                let wire = pwr.0;
+                power_combo.set_selected(wire_index(&current_choices.borrow(), wire));
+                power_combo.set_subtitle(mode_description(is_2025, wire));
                 cpu_combo.set_selected(pwr.1 as u32);
                 gpu_combo.set_selected(pwr.2 as u32);
-                let show = pwr.0 == 4;
+                let show = wire == 4;
                 cpu_combo.set_visible(show);
                 gpu_combo.set_visible(show);
+                if !fan_dragging.get() {
+                    set_fan_bounds(wire);
+                }
             }
             let fs = get_fan_speed(ac).unwrap_or(0);
             let mode = if fs == 0 { 0 } else { 1 };
@@ -1236,7 +1351,7 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
                 if mode == 1 {
                     fan_scale.set_value(fs as f64);
                 } else {
-                    fan_scale.set_value(min_fan);
+                    fan_scale.set_value(fan_scale.adjustment().lower());
                 }
             }
             fan_container.set_visible(mode == 1);
@@ -1270,25 +1385,39 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         }
     }
 
+    // Map a combo index to its wire value via the active choices list.
+    let selected_wire = {
+        let current_choices = current_choices.clone();
+        let power_combo = power_combo.clone();
+        move || -> u8 {
+            let idx = power_combo.selected() as usize;
+            current_choices.borrow().get(idx).map(|(_, wire)| *wire).unwrap_or(0)
+        }
+    };
+
     // Power profile change
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
         let cpu_combo = cpu_combo.clone();
         let gpu_combo = gpu_combo.clone();
+        let current_choices = current_choices.clone();
+        let set_fan_bounds = set_fan_bounds.clone();
         power_combo.connect_selected_notify(glib::clone!(
             #[weak] cpu_combo, #[weak] gpu_combo,
             move |pp| {
                 if refreshing.get() { return; }
                 let ac = is_ac.get();
-                let profile = pp.selected() as u8;
+                let idx = pp.selected() as usize;
+                let wire = current_choices.borrow().get(idx).map(|(_, w)| *w).unwrap_or(0);
                 let cpu = cpu_combo.selected() as u8;
                 let gpu = gpu_combo.selected() as u8;
-                set_power(ac, (profile, cpu, gpu));
-                pp.set_subtitle(profile_description(profile as u32));
-                let show = profile == 4;
+                set_power(ac, (wire, cpu, gpu));
+                pp.set_subtitle(mode_description(is_2025, wire));
+                let show = wire == 4;
                 cpu_combo.set_visible(show);
                 gpu_combo.set_visible(show);
+                set_fan_bounds(wire);
             }
         ));
     }
@@ -1296,17 +1425,17 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        let power_combo = power_combo.clone();
         let gpu_combo = gpu_combo.clone();
+        let selected_wire = selected_wire.clone();
         cpu_combo.connect_selected_notify(glib::clone!(
-            #[weak] power_combo, #[weak] gpu_combo,
+            #[weak] gpu_combo,
             move |cb| {
                 if refreshing.get() { return; }
                 let ac = is_ac.get();
-                let profile = power_combo.selected() as u8;
+                let wire = selected_wire();
                 let cpu = cb.selected() as u8;
                 let gpu = gpu_combo.selected() as u8;
-                set_power(ac, (profile, cpu, gpu));
+                set_power(ac, (wire, cpu, gpu));
             }
         ));
     }
@@ -1314,17 +1443,17 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     {
         let is_ac = is_ac.clone();
         let refreshing = refreshing.clone();
-        let power_combo = power_combo.clone();
         let cpu_combo = cpu_combo.clone();
+        let selected_wire = selected_wire.clone();
         gpu_combo.connect_selected_notify(glib::clone!(
-            #[weak] power_combo, #[weak] cpu_combo,
+            #[weak] cpu_combo,
             move |gb| {
                 if refreshing.get() { return; }
                 let ac = is_ac.get();
-                let profile = power_combo.selected() as u8;
+                let wire = selected_wire();
                 let cpu = cpu_combo.selected() as u8;
                 let gpu = gb.selected() as u8;
-                set_power(ac, (profile, cpu, gpu));
+                set_power(ac, (wire, cpu, gpu));
             }
         ));
     }
@@ -1352,7 +1481,8 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
             match mode {
                 0 => { set_fan_speed(ac, 0); }
                 1 => {
-                    let value = fan_scale.value().max(min_fan_speed);
+                    // Clamp to the current mode's minimum (the slider's lower bound).
+                    let value = fan_scale.value().max(fan_scale.adjustment().lower());
                     fan_scale.set_value(value);
                     set_fan_speed(ac, value as i32);
                 }
