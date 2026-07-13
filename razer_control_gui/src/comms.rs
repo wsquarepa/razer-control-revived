@@ -96,7 +96,8 @@ pub enum CommandResult {
 #[allow(dead_code)]
 pub fn performance_mode_label(wire_mode: u8) -> &'static str {
     match wire_mode {
-        0 => "Balanced",
+        // 0 is the AC Balanced slot, 6 the battery slot; one logical mode.
+        0 | 6 => "Balanced",
         2 => "Maximum Performance",
         3 => "Battery Saver",
         4 => "Custom",
@@ -120,7 +121,7 @@ pub fn performance_mode_display(wire_mode: u8) -> String {
 #[allow(dead_code)]
 pub fn provisional_rpm_range(wire_mode: u8) -> (u16, u16) {
     match wire_mode {
-        0 | 5 => (3400, 5200),
+        0 | 5 | 6 => (3400, 5200),
         2 | 3 => (3300, 5400),
         4 => (4000, 5300),
         _ => (3300, 5400),
@@ -391,9 +392,10 @@ mod tests {
 
     #[test]
     fn does_not_expose_hyperboost_or_unknown_modes_by_name() {
+        assert_eq!(performance_mode_label(6), "Balanced");
+        assert_eq!(provisional_rpm_range(6), (3400, 5200));
         assert_eq!(performance_mode_label(7), "Unknown");
         assert_eq!(performance_mode_label(1), "Unknown");
-        assert_eq!(performance_mode_label(6), "Unknown");
         assert_eq!(performance_mode_display(7), "Unknown (7)");
     }
 

@@ -687,11 +687,11 @@ fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Optio
             )
             .exit()
     }
-    if !matches!(pwr_mode, 0 | 2 | 3 | 4 | 5) {
+    if !matches!(pwr_mode, 0 | 2 | 3 | 4 | 5 | 6) {
         Cli::command()
             .error(
                 ErrorKind::InvalidValue,
-                "Power mode must be 0 (Balanced), 2 (Maximum Performance), 3 (Battery Saver), 4 (Custom) or 5 (Silent)",
+                "Power mode must be 0 (Balanced, AC), 2 (Maximum Performance), 3 (Battery Saver), 4 (Custom), 5 (Silent) or 6 (Balanced, battery)",
             )
             .exit()
     }

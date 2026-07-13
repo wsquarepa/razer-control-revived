@@ -1148,7 +1148,7 @@ fn power_mode_choices(device: &SupportedDevice, ac: bool) -> Vec<(&'static str, 
         if ac {
             vec![("Balanced", 0), ("Silent", 5), ("Maximum Performance", 2), ("Custom", 4)]
         } else {
-            vec![("Balanced", 0), ("Battery Saver", 3)]
+            vec![("Balanced", 6), ("Battery Saver", 3)]
         }
     } else {
         vec![("Balanced", 0), ("Performance", 1), ("Studio", 2), ("Silent", 3), ("Custom", 4)]
@@ -1164,7 +1164,7 @@ fn wire_index(choices: &[(&'static str, u8)], wire: u8) -> u32 {
 fn mode_description(is_2025: bool, wire: u8) -> &'static str {
     if is_2025 {
         match wire {
-            0 => "Good mix of performance and battery life",
+            0 | 6 => "Good mix of performance and battery life",
             2 => "Maximum performance, higher power draw",
             3 => "Extends battery life, reduced performance",
             4 => "Manually tune CPU and GPU levels",

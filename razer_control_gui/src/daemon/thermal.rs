@@ -47,6 +47,12 @@ pub enum PowerSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMode {
     Balanced,
+    /// The DC-domain slot of Balanced (wire 6): the EC partitions the mode
+    /// namespace by power source, so Balanced latches as 0 on AC and 6 on
+    /// battery. Observed on the validation unit (EC reported 6 after a
+    /// battery boot) and corroborated by the hoenerc fork's evidence-tagged
+    /// EC protocol reference for PID 02C6.
+    BalancedBattery,
     MaximumPerformance,
     BatterySaver,
     Custom,
@@ -58,6 +64,7 @@ impl PerformanceMode {
     pub const fn wire_value(self) -> u8 {
         match self {
             PerformanceMode::Balanced => 0,
+            PerformanceMode::BalancedBattery => 6,
             PerformanceMode::MaximumPerformance => 2,
             PerformanceMode::BatterySaver => 3,
             PerformanceMode::Custom => 4,
@@ -77,6 +84,7 @@ impl TryFrom<u8> for PerformanceMode {
             3 => Ok(PerformanceMode::BatterySaver),
             4 => Ok(PerformanceMode::Custom),
             5 => Ok(PerformanceMode::Silent),
+            6 => Ok(PerformanceMode::BalancedBattery),
             7 => Ok(PerformanceMode::Hyperboost),
             _ => Err(ThermalPolicyError::UnknownMode { wire_value }),
         }
@@ -143,7 +151,16 @@ const AC_SELECTABLE_MODES: [PerformanceMode; 4] = [
 ];
 
 const BATTERY_SELECTABLE_MODES: [PerformanceMode; 2] =
-    [PerformanceMode::Balanced, PerformanceMode::BatterySaver];
+    [PerformanceMode::BalancedBattery, PerformanceMode::BatterySaver];
+
+/// The Balanced slot for a power domain: the EC partitions Balanced into wire 0
+/// (AC) and wire 6 (battery), so "default to Balanced" must pick per source.
+pub const fn balanced_for(source: PowerSource) -> PerformanceMode {
+    match source {
+        PowerSource::Ac => PerformanceMode::Balanced,
+        PowerSource::Battery => PerformanceMode::BalancedBattery,
+    }
+}
 
 /// Modes the daemon offers for the given power source. Hyperboost is
 /// recognized but never offered: Synapse runtime-gates it and this SKU has
@@ -163,7 +180,9 @@ pub fn is_mode_selectable(source: PowerSource, mode: PerformanceMode) -> bool {
 /// 0x86 limit collection on the repaired unit confirms or replaces them.
 pub const fn provisional_rpm_range(mode: PerformanceMode) -> RpmRange {
     match mode {
-        PerformanceMode::Balanced | PerformanceMode::Silent => RpmRange { min: 3400, max: 5200 },
+        PerformanceMode::Balanced | PerformanceMode::BalancedBattery | PerformanceMode::Silent => {
+            RpmRange { min: 3400, max: 5200 }
+        }
         PerformanceMode::MaximumPerformance | PerformanceMode::BatterySaver => {
             RpmRange { min: 3300, max: 5400 }
         }
@@ -794,7 +813,7 @@ mod tests {
         );
         assert_eq!(
             selectable_modes(PowerSource::Battery),
-            &[PerformanceMode::Balanced, PerformanceMode::BatterySaver]
+            &[PerformanceMode::BalancedBattery, PerformanceMode::BatterySaver]
         );
     }
 
@@ -842,12 +861,12 @@ mod tests {
             Ok(PerformanceMode::Hyperboost)
         );
         assert_eq!(
-            PerformanceMode::try_from(1u8),
-            Err(ThermalPolicyError::UnknownMode { wire_value: 1 })
+            PerformanceMode::try_from(6u8),
+            Ok(PerformanceMode::BalancedBattery)
         );
         assert_eq!(
-            PerformanceMode::try_from(6u8),
-            Err(ThermalPolicyError::UnknownMode { wire_value: 6 })
+            PerformanceMode::try_from(1u8),
+            Err(ThermalPolicyError::UnknownMode { wire_value: 1 })
         );
     }
 
@@ -855,6 +874,7 @@ mod tests {
     fn wire_values_round_trip() {
         for mode in [
             PerformanceMode::Balanced,
+            PerformanceMode::BalancedBattery,
             PerformanceMode::MaximumPerformance,
             PerformanceMode::BatterySaver,
             PerformanceMode::Custom,
@@ -873,6 +893,10 @@ mod tests {
 
     #[test]
     fn rejects_unavailable_mode_for_power_source() {
+        // Balanced is domain-partitioned: wire 0 is the AC slot, wire 6 the
+        // battery slot, and neither is selectable in the other domain.
+        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Balanced));
+        assert!(!is_mode_selectable(PowerSource::Ac, PerformanceMode::BalancedBattery));
         assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::MaximumPerformance));
         assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Silent));
         assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Custom));

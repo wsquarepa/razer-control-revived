@@ -91,15 +91,16 @@ fn power_source_label(source: PowerSource) -> &'static str {
     }
 }
 
-/// Map a legacy generic mode name onto the 2025 wire value: Balanced 0 stays,
-/// Gaming 1 and Creator 2 both name Maximum Performance 2, Silent 3 becomes 5,
-/// Custom 4 stays. Values outside the legacy set are configuration errors.
+/// Map a legacy generic mode name onto the 2025 wire value: Balanced 0 becomes
+/// the source's Balanced slot (0 on AC, 6 on battery), Gaming 1 and Creator 2
+/// both name Maximum Performance 2, Silent 3 becomes 5, Custom 4 stays. Values
+/// outside the legacy set are configuration errors.
 fn migrate_legacy_mode(
     wire_value: u8,
     source: PowerSource,
 ) -> Result<PerformanceMode, ConfigurationError> {
     match wire_value {
-        0 => Ok(PerformanceMode::Balanced),
+        0 => Ok(thermal::balanced_for(source)),
         1 | 2 => Ok(PerformanceMode::MaximumPerformance),
         3 => Ok(PerformanceMode::Silent),
         4 => Ok(PerformanceMode::Custom),
@@ -120,12 +121,13 @@ fn migrate_availability(
     if thermal::is_mode_selectable(source, named_mode) {
         return named_mode;
     }
+    let fallback: PerformanceMode = thermal::balanced_for(source);
     warnings.push(MigrationWarning::ModeUnavailableOnSource {
         power_source: power_source_label(source),
         requested_wire_value: named_mode.wire_value(),
-        migrated_wire_value: PerformanceMode::Balanced.wire_value(),
+        migrated_wire_value: fallback.wire_value(),
     });
-    PerformanceMode::Balanced
+    fallback
 }
 
 fn migrate_level(
@@ -369,15 +371,30 @@ mod tests {
     #[test]
     fn migrates_unavailable_battery_mode_to_balanced() {
         // Legacy battery-side Gaming (1) names Maximum Performance, which is
-        // AC-only on the 2025 model; availability migration lands on Balanced.
+        // AC-only on the 2025 model; availability migration lands on the
+        // battery-domain Balanced slot (6).
         let mut configuration: Configuration = legacy_configuration();
         configuration.power[0].power_mode = 1;
         let outcome: MigrationOutcome = migrate(configuration);
-        assert_eq!(outcome.configuration.power[0].power_mode, 0);
+        assert_eq!(outcome.configuration.power[0].power_mode, 6);
         assert!(outcome
             .warnings
             .iter()
             .any(|warning| matches!(warning, MigrationWarning::ModeUnavailableOnSource { .. })));
+    }
+
+    #[test]
+    fn migrates_battery_balanced_to_dc_slot() {
+        // Legacy Balanced (0) on the battery profile keeps its intent but moves
+        // to the battery-domain wire value 6; no warning, the mode is unchanged
+        // logically. The AC profile keeps wire 0.
+        let mut configuration: Configuration = legacy_configuration();
+        configuration.power[0].power_mode = 0;
+        configuration.power[1].power_mode = 0;
+        let outcome: MigrationOutcome = migrate(configuration);
+        assert_eq!(outcome.configuration.power[0].power_mode, 6);
+        assert_eq!(outcome.configuration.power[1].power_mode, 0);
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -438,14 +455,15 @@ mod tests {
 
     #[test]
     fn checks_rpm_against_post_availability_mode() {
-        // Battery legacy Gaming (1) lands on Balanced; 5300 is valid for the
-        // named Maximum Performance range but invalid for Balanced, so the RPM
-        // check must run against the availability-migrated mode.
+        // Battery legacy Gaming (1) lands on the battery Balanced slot (6);
+        // 5300 is valid for the named Maximum Performance range but invalid for
+        // Balanced, so the RPM check must run against the availability-migrated
+        // mode.
         let mut configuration: Configuration = legacy_configuration();
         configuration.power[0].power_mode = 1;
         configuration.power[0].fan_rpm = 5300;
         let outcome: MigrationOutcome = migrate(configuration);
-        assert_eq!(outcome.configuration.power[0].power_mode, 0);
+        assert_eq!(outcome.configuration.power[0].power_mode, 6);
         assert_eq!(outcome.configuration.power[0].fan_rpm, 0);
     }
 
@@ -479,7 +497,7 @@ mod tests {
             serde_json::from_str(include_str!("../../testdata/legacy-02c6-config.json")).unwrap();
         let outcome: MigrationOutcome =
             migrate_for_pid(legacy, thermal::BLADE_16_2025_PID).unwrap();
-        assert_eq!(outcome.configuration.power[0].power_mode, 0);
+        assert_eq!(outcome.configuration.power[0].power_mode, 6);
         assert_eq!(outcome.configuration.power[1].power_mode, 4);
         assert_eq!(outcome.configuration.power[0].cpu_boost, 2);
         assert_eq!(outcome.configuration.power[1].gpu_boost, 2);
