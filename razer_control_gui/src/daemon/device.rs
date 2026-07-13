@@ -136,40 +136,6 @@ impl From<thermal::ThermalDecodeError> for PreflightError {
     }
 }
 
-/// A supervised limit-collection failure. Restoration failures reuse these
-/// variants and win primacy via `thermal::resolve_with_restoration`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LimitCollectionError {
-    Transport(TransportError),
-    Decode(thermal::ThermalDecodeError),
-    Policy(thermal::ThermalPolicyError),
-    /// The EC did not read back the mode that was just written.
-    ModeReadbackMismatch { requested: u8, observed: u8 },
-    /// Limit collection is only defined for the Blade 16 2025 EC.
-    UnsupportedDevice { pid: u16 },
-    /// The current physical power source could not be read, so the set of modes
-    /// to sweep is unknown.
-    PowerSourceUnavailable,
-}
-
-impl From<TransportError> for LimitCollectionError {
-    fn from(error: TransportError) -> LimitCollectionError {
-        LimitCollectionError::Transport(error)
-    }
-}
-
-impl From<thermal::ThermalDecodeError> for LimitCollectionError {
-    fn from(error: thermal::ThermalDecodeError) -> LimitCollectionError {
-        LimitCollectionError::Decode(error)
-    }
-}
-
-impl From<thermal::ThermalPolicyError> for LimitCollectionError {
-    fn from(error: thermal::ThermalPolicyError) -> LimitCollectionError {
-        LimitCollectionError::Policy(error)
-    }
-}
-
 /// A failure from the verified thermal application sequence or the telemetry
 /// monitor (Blade 16 2025 only). Transport and decode failures carry the full
 /// typed cause; a readback that did not match the request or a write refused
@@ -1201,48 +1167,6 @@ impl DeviceManager {
         self.get_device().map_or(false, |laptop| laptop.pid() == thermal::BLADE_16_2025_PID)
     }
 
-    /// Read the current physical power source from UPower. The mode set to sweep
-    /// during limit collection depends on it, so a read failure is a hard error
-    /// rather than an assumed default.
-    fn current_power_source(&self) -> Result<thermal::PowerSource, LimitCollectionError> {
-        let dbus_system = Connection::new_system()
-            .map_err(|_| LimitCollectionError::PowerSourceUnavailable)?;
-        let proxy_ac = dbus_system.with_proxy(
-            "org.freedesktop.UPower",
-            "/org/freedesktop/UPower/devices/line_power_AC0",
-            time::Duration::from_millis(5000),
-        );
-        use battery::OrgFreedesktopUPowerDevice;
-        let online = proxy_ac
-            .online()
-            .map_err(|_| LimitCollectionError::PowerSourceUnavailable)?;
-        Ok(if online {
-            thermal::PowerSource::Ac
-        } else {
-            thermal::PowerSource::Battery
-        })
-    }
-
-    /// Supervised limit collection: sweep the modes valid for the current power
-    /// source, reading each mode's global fan limits, then restore the original
-    /// mode. See `RazerLaptop::collect_thermal_limits` for the per-mode loop.
-    pub fn collect_thermal_limits(
-        &mut self,
-    ) -> Result<Vec<thermal::ModeLimits>, LimitCollectionError> {
-        let pid: u16 = match self.get_device() {
-            Some(laptop) => laptop.pid(),
-            None => return Err(LimitCollectionError::PowerSourceUnavailable),
-        };
-        if pid != thermal::BLADE_16_2025_PID {
-            return Err(LimitCollectionError::UnsupportedDevice { pid });
-        }
-        let source: thermal::PowerSource = self.current_power_source()?;
-        match self.get_device() {
-            Some(laptop) => laptop.collect_thermal_limits(source),
-            None => Err(LimitCollectionError::PowerSourceUnavailable),
-        }
-    }
-
     pub fn get_device(&mut self) -> Option<&mut RazerLaptop> {
         return self.device.as_mut();
     }
@@ -2238,84 +2162,6 @@ impl RazerLaptop {
         // preflight_plan always begins with the 0x80 fan-ID query, so this is set.
         let fans = fans.expect("preflight_plan always includes the 0x80 fan-ID query");
         Ok(thermal::PreflightReport { fans, zones })
-    }
-
-    /// Read the currently active performance-mode byte via Get Thermal Fan Mode
-    /// (0x82). The CPU zone is authoritative for the mode-global reading, and the
-    /// reply's profile/fan identity is validated so a stale reply is never read
-    /// as the active mode.
-    fn read_active_mode(&mut self) -> Result<u8, LimitCollectionError> {
-        let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_mode(thermal::FanId::Cpu))?;
-        let (mode_byte, _manual) = thermal::decode_fan_mode(thermal::FanId::Cpu, &reply)?;
-        Ok(mode_byte)
-    }
-
-    /// Write a performance mode to both zones via Set Thermal Fan Mode (0x02),
-    /// leaving the manual flag clear so the EC keeps automatic control while the
-    /// mode-global limits are read.
-    fn activate_mode(&mut self, mode: thermal::PerformanceMode) -> Result<(), TransportError> {
-        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
-            self.send_thermal(&thermal::set_fan_mode(fan, mode, false))?;
-        }
-        Ok(())
-    }
-
-    /// Restore the mode the EC was in before collection started, verifying the
-    /// readback. A failure here is the terminal error for the whole operation.
-    fn restore_mode(&mut self, original_mode_byte: u8) -> Result<(), LimitCollectionError> {
-        let mode: thermal::PerformanceMode =
-            thermal::PerformanceMode::try_from(original_mode_byte)?;
-        self.activate_mode(mode)?;
-        let observed: u8 = self.read_active_mode()?;
-        if observed != original_mode_byte {
-            return Err(LimitCollectionError::ModeReadbackMismatch {
-                requested: original_mode_byte,
-                observed,
-            });
-        }
-        Ok(())
-    }
-
-    /// Sweep the given modes, reading each mode's global fan limits after
-    /// verifying the mode actually latched via a 0x82 readback. Exactly one
-    /// argument-0 0x86 read is issued per mode.
-    fn sweep_mode_limits(
-        &mut self,
-        modes: &[thermal::PerformanceMode],
-    ) -> Result<Vec<thermal::ModeLimits>, LimitCollectionError> {
-        let mut collected: Vec<thermal::ModeLimits> = Vec::with_capacity(modes.len());
-        for &mode in modes {
-            self.activate_mode(mode)?;
-            let observed: u8 = self.read_active_mode()?;
-            if observed != mode.wire_value() {
-                return Err(LimitCollectionError::ModeReadbackMismatch {
-                    requested: mode.wire_value(),
-                    observed,
-                });
-            }
-            let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_limits())?;
-            let limits: thermal::FanLimits = thermal::decode_fan_limits(&reply)?;
-            collected.push(thermal::ModeLimits { mode, limits });
-        }
-        Ok(collected)
-    }
-
-    /// Supervised limit collection for the Blade 16 2025 EC: record the original
-    /// mode, sweep the modes valid for `source`, then always restore the original
-    /// mode. Restoration failure outranks any collection failure that preceded it
-    /// (see `thermal::resolve_with_restoration`).
-    pub fn collect_thermal_limits(
-        &mut self,
-        source: thermal::PowerSource,
-    ) -> Result<Vec<thermal::ModeLimits>, LimitCollectionError> {
-        if self.pid != thermal::BLADE_16_2025_PID {
-            return Err(LimitCollectionError::UnsupportedDevice { pid: self.pid });
-        }
-        let original_mode_byte: u8 = self.read_active_mode()?;
-        let collection: Result<Vec<thermal::ModeLimits>, LimitCollectionError> =
-            self.sweep_mode_limits(thermal::selectable_modes(source));
-        let restoration: Result<(), LimitCollectionError> = self.restore_mode(original_mode_byte);
-        thermal::resolve_with_restoration(collection, restoration)
     }
 
     /// Convert a transport failure into the legacy `Option` shape, logging the

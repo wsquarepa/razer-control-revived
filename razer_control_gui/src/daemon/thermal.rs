@@ -1,11 +1,12 @@
 //! Pure thermal-safety policy for the Razer Blade 16 2025 (PID 0x02C6).
 //!
 //! Every function here is a pure decision: no HID I/O, no daemon state. The
-//! RPM ranges are Synapse product-710 configuration defaults and remain
-//! provisional until the supervised `0x86` limit collection confirms them on
-//! the physical unit. Hyperboost and custom level 3 (Extreme) are recognized
-//! for decoding but rejected by every setter-facing validation until the
-//! gated hardware validation passes.
+//! RPM ranges are Synapse product-710 configuration defaults and are the
+//! permanent validation basis: the EC does not implement `0x86` Get Thermal
+//! Fan Information (verified NOT_SUPPORTED on the physical unit), so no
+//! EC-reported limits exist to replace them. Hyperboost and custom level 3
+//! (Extreme) are recognized for decoding but rejected by every setter-facing
+//! validation until the gated hardware validation passes.
 
 pub const BLADE_16_2025_PID: u16 = 0x02c6;
 
@@ -176,8 +177,9 @@ pub fn is_mode_selectable(source: PowerSource, mode: PerformanceMode) -> bool {
     selectable_modes(source).contains(&mode)
 }
 
-/// Synapse product-710 configuration defaults; provisional until the live
-/// 0x86 limit collection on the repaired unit confirms or replaces them.
+/// Synapse product-710 configuration defaults. These are the permanent
+/// validation basis: the 02C6 EC does not implement the 0x86 limits read
+/// (verified NOT_SUPPORTED on hardware), so no EC-reported ranges exist.
 pub const fn provisional_rpm_range(mode: PerformanceMode) -> RpmRange {
     match mode {
         PerformanceMode::Balanced | PerformanceMode::BalancedBattery | PerformanceMode::Silent => {
@@ -236,14 +238,6 @@ pub struct ThermalCommand {
     pub args: [u8; 80],
 }
 
-/// EC-reported fan RPM limits for one performance mode, already scaled to RPM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FanLimits {
-    pub min: u16,
-    pub default: u16,
-    pub max: u16,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalDecodeError {
     UnexpectedFanCount { expected: u8, actual: u8 },
@@ -252,8 +246,6 @@ pub enum ThermalDecodeError {
     MissingFanId { fan: FanId },
     UnexpectedProfile { expected: u8, actual: u8 },
     UnexpectedFan { expected: u8, actual: u8 },
-    ZeroLimit { min: u16, default: u16, max: u16 },
-    InvertedLimits { min: u16, default: u16, max: u16 },
 }
 
 /// Profile slot every per-fan thermal command targets. Pinning this to 1 keeps
@@ -310,13 +302,6 @@ pub fn get_fan_mode(fan: FanId) -> ThermalCommand {
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
     ThermalCommand { command_id: 0x82, data_size: 4, args }
-}
-
-/// Build the 0x86 Get Thermal Fan Information request. Limits are per
-/// performance mode, not per fan zone, so the payload is a single argument-0
-/// byte (Synapse request tuple `[7, 13, 134]`).
-pub fn get_fan_limits() -> ThermalCommand {
-    ThermalCommand { command_id: 0x86, data_size: 7, args: [0u8; 80] }
 }
 
 /// Build the 0x87 Get Custom CPU/GPU Level request: `[profile=1, fan_id]`.
@@ -408,22 +393,6 @@ fn verify_reply_identity(fan: FanId, args: &[u8; 80]) -> Result<(), ThermalDecod
     Ok(())
 }
 
-/// Decode a 0x86 Get Thermal Fan Information reply. Minimum, default, and
-/// maximum RPM sit at fields B/D/F (args indices 6/8/10), each in units of 100
-/// RPM. Rejects a zero limit or a non-ascending min/default/max ordering.
-pub fn decode_fan_limits(args: &[u8; 80]) -> Result<FanLimits, ThermalDecodeError> {
-    let min: u16 = u16::from(args[6]) * 100;
-    let default: u16 = u16::from(args[8]) * 100;
-    let max: u16 = u16::from(args[10]) * 100;
-    if min == 0 || default == 0 || max == 0 {
-        return Err(ThermalDecodeError::ZeroLimit { min, default, max });
-    }
-    if min > default || default > max {
-        return Err(ThermalDecodeError::InvertedLimits { min, default, max });
-    }
-    Ok(FanLimits { min, default, max })
-}
-
 /// The getter-only diagnostic sweep the daemon runs before it trusts the EC.
 /// It is structurally unable to mutate EC state: it calls only the `get_*`
 /// builders, so it can never emit 0x01 (Set Fan Speed), 0x02 (Set Fan Mode), or
@@ -456,30 +425,6 @@ pub struct ZoneTelemetry {
 pub struct PreflightReport {
     pub fans: [FanId; 2],
     pub zones: Vec<ZoneTelemetry>,
-}
-
-/// The EC-reported fan RPM limits for one performance mode, gathered during
-/// supervised limit collection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ModeLimits {
-    pub mode: PerformanceMode,
-    pub limits: FanLimits,
-}
-
-/// Combine a supervised-collection result with the mandatory restore result,
-/// giving restoration failure primacy: a failed restore is the terminal error
-/// even when collection had already failed, because leaving the EC parked in a
-/// probe mode is worse than losing the readings. Restoration is a parameter, so
-/// a caller must always compute it — collection failure never short-circuits the
-/// restore attempt away.
-pub fn resolve_with_restoration<T, E>(
-    collection: Result<T, E>,
-    restoration: Result<(), E>,
-) -> Result<T, E> {
-    match restoration {
-        Err(restoration_error) => Err(restoration_error),
-        Ok(()) => collection,
-    }
 }
 
 /// The daemon's live thermal-safety posture.
@@ -746,52 +691,40 @@ pub fn dgpu_resume_plan(mode: PerformanceMode, gpu_level: u8) -> Vec<ThermalComm
     vec![set_boost(FanId::Gpu, gpu_level), get_boost(FanId::Gpu)]
 }
 
-/// How the daemon binary was invoked. The three modes are mutually exclusive and
+/// How the daemon binary was invoked. The modes are mutually exclusive and
 /// matched once at startup, so no per-mode behavior flag is threaded downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonExecution {
     Service,
     PreflightOnly,
-    CollectThermalLimits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionParseError {
-    ConflictingFlags,
     UnknownFlag(String),
 }
 
 impl std::fmt::Display for ExecutionParseError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecutionParseError::ConflictingFlags => write!(
-                formatter,
-                "{PREFLIGHT_ONLY_FLAG} and {COLLECT_THERMAL_LIMITS_FLAG} are mutually exclusive"
-            ),
             ExecutionParseError::UnknownFlag(flag) => write!(formatter, "unknown flag {flag}"),
         }
     }
 }
 
 const PREFLIGHT_ONLY_FLAG: &str = "--preflight-only";
-const COLLECT_THERMAL_LIMITS_FLAG: &str = "--collect-thermal-limits";
 
 /// Parse the daemon's execution mode from its argument flags (argv without the
-/// program name). Any unrecognized flag or a second, different mode flag is a
-/// hard parse error; a repeated identical flag is harmless.
+/// program name). Any unrecognized flag is a hard parse error; a repeated
+/// identical flag is harmless.
 pub fn parse_execution(flags: &[String]) -> Result<DaemonExecution, ExecutionParseError> {
     let mut selected: Option<DaemonExecution> = None;
     for flag in flags {
         let requested = match flag.as_str() {
             PREFLIGHT_ONLY_FLAG => DaemonExecution::PreflightOnly,
-            COLLECT_THERMAL_LIMITS_FLAG => DaemonExecution::CollectThermalLimits,
             other => return Err(ExecutionParseError::UnknownFlag(other.to_string())),
         };
-        match selected {
-            None => selected = Some(requested),
-            Some(existing) if existing == requested => {}
-            Some(_) => return Err(ExecutionParseError::ConflictingFlags),
-        }
+        selected = Some(requested);
     }
     Ok(selected.unwrap_or(DaemonExecution::Service))
 }
@@ -1157,15 +1090,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_get_fan_limits_request_mode_global() {
-        // 0x86 is mode-global: a single argument-0 payload, never profile-pinned or per fan.
-        let command: ThermalCommand = get_fan_limits();
-        assert_eq!(command.command_id, 0x86);
-        assert_eq!(command.data_size, 7);
-        assert_eq!(command.args, [0u8; 80]);
-    }
-
-    #[test]
     fn builds_get_boost_request_with_profile_one() {
         let command: ThermalCommand = get_boost(FanId::Gpu);
         assert_eq!(command.command_id, 0x87);
@@ -1205,42 +1129,6 @@ mod tests {
         assert_eq!(
             decode_fan_rpm(FanId::Cpu, &args),
             Err(ThermalDecodeError::UnexpectedFan { expected: 1, actual: 2 })
-        );
-    }
-
-    #[test]
-    fn decodes_fan_limits() {
-        let mut args: [u8; 80] = [0; 80];
-        args[6] = 34;
-        args[8] = 40;
-        args[10] = 54;
-        assert_eq!(
-            decode_fan_limits(&args),
-            Ok(FanLimits { min: 3400, default: 4000, max: 5400 })
-        );
-    }
-
-    #[test]
-    fn rejects_zero_fan_limits() {
-        let mut args: [u8; 80] = [0; 80];
-        args[6] = 34;
-        args[8] = 0;
-        args[10] = 54;
-        assert_eq!(
-            decode_fan_limits(&args),
-            Err(ThermalDecodeError::ZeroLimit { min: 3400, default: 0, max: 5400 })
-        );
-    }
-
-    #[test]
-    fn rejects_inverted_fan_limits() {
-        let mut args: [u8; 80] = [0; 80];
-        args[6] = 54;
-        args[8] = 40;
-        args[10] = 34;
-        assert_eq!(
-            decode_fan_limits(&args),
-            Err(ThermalDecodeError::InvertedLimits { min: 5400, default: 4000, max: 3400 })
         );
     }
 
@@ -1315,37 +1203,6 @@ mod tests {
     }
 
     #[test]
-    fn restoration_failure_outranks_collection_failure() {
-        // Both failed: leaving the EC in a probe mode is worse than losing the
-        // readings, so the restore error is the terminal one.
-        assert_eq!(
-            resolve_with_restoration::<i32, &str>(Err("collection"), Err("restore")),
-            Err("restore")
-        );
-    }
-
-    #[test]
-    fn collection_failure_surfaces_when_restoration_succeeds() {
-        assert_eq!(
-            resolve_with_restoration::<i32, &str>(Err("collection"), Ok(())),
-            Err("collection")
-        );
-    }
-
-    #[test]
-    fn restoration_failure_fails_a_clean_collection() {
-        assert_eq!(
-            resolve_with_restoration::<i32, &str>(Ok(7), Err("restore")),
-            Err("restore")
-        );
-    }
-
-    #[test]
-    fn successful_collection_and_restoration_return_readings() {
-        assert_eq!(resolve_with_restoration::<i32, &str>(Ok(7), Ok(())), Ok(7));
-    }
-
-    #[test]
     fn parse_execution_defaults_to_service() {
         assert_eq!(parse_execution(&[]), Ok(DaemonExecution::Service));
     }
@@ -1356,20 +1213,17 @@ mod tests {
             parse_execution(&["--preflight-only".to_string()]),
             Ok(DaemonExecution::PreflightOnly)
         );
-        assert_eq!(
-            parse_execution(&["--collect-thermal-limits".to_string()]),
-            Ok(DaemonExecution::CollectThermalLimits)
-        );
     }
 
     #[test]
-    fn parse_execution_rejects_conflicting_flags() {
+    fn parse_execution_rejects_removed_limit_collection_flag() {
+        // 0x86 Get Thermal Fan Information is NOT_SUPPORTED on the 02C6 EC
+        // (verified on hardware), so the collection mode no longer exists.
         assert_eq!(
-            parse_execution(&[
-                "--preflight-only".to_string(),
-                "--collect-thermal-limits".to_string(),
-            ]),
-            Err(ExecutionParseError::ConflictingFlags)
+            parse_execution(&["--collect-thermal-limits".to_string()]),
+            Err(ExecutionParseError::UnknownFlag(
+                "--collect-thermal-limits".to_string()
+            ))
         );
     }
 

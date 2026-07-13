@@ -67,7 +67,6 @@ fn main() {
     match thermal::parse_execution(&flags) {
         Ok(thermal::DaemonExecution::Service) => run_service(),
         Ok(thermal::DaemonExecution::PreflightOnly) => run_preflight_only(),
-        Ok(thermal::DaemonExecution::CollectThermalLimits) => run_limit_collection(),
         Err(error) => {
             eprintln!("invalid arguments: {error}");
             std::process::exit(2);
@@ -117,31 +116,6 @@ fn run_preflight_only() {
     }
     eprintln!("thermal preflight failed");
     std::process::exit(1);
-}
-
-/// `--collect-thermal-limits`: run the supervised mode-global limit sweep and
-/// print the readings, exiting nonzero if collection or restoration failed.
-fn run_limit_collection() {
-    discover_and_migrate_or_exit();
-    let result = match DEV_MANAGER.lock() {
-        Ok(mut d) => d.collect_thermal_limits(),
-        Err(_) => {
-            eprintln!("device manager unavailable");
-            std::process::exit(1);
-        }
-    };
-    match result {
-        Ok(limits) => {
-            for entry in &limits {
-                println!("{entry:?}");
-            }
-            std::process::exit(0);
-        }
-        Err(error) => {
-            eprintln!("thermal limit collection failed: {error:?}");
-            std::process::exit(1);
-        }
-    }
 }
 
 /// Normal daemon service: discover, migrate, run preflight, then apply saved
