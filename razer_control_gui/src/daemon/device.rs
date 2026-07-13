@@ -169,6 +169,52 @@ impl From<thermal::ThermalPolicyError> for LimitCollectionError {
     }
 }
 
+/// A failure from the verified thermal application sequence or the telemetry
+/// monitor (Blade 16 2025 only). Transport and decode failures carry the full
+/// typed cause; a readback that did not match the request or a write refused
+/// because the daemon is in the Disabled safety posture are distinct variants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThermalError {
+    Transport(TransportError),
+    Decode(thermal::ThermalDecodeError),
+    Policy(thermal::ThermalPolicyError),
+    /// A readback (0x82 mode, 0x87 boost, or 0x81 setpoint) decoded cleanly for
+    /// its own zone but did not equal what was written.
+    ReadbackMismatch { command_id: u8, requested: u8, observed: u8 },
+    /// The safety state machine is Disabled, so the write is refused before any
+    /// command is constructed and no HID I/O is attempted.
+    WritesDisabled,
+}
+
+impl From<TransportError> for ThermalError {
+    fn from(error: TransportError) -> ThermalError {
+        ThermalError::Transport(error)
+    }
+}
+
+impl From<thermal::ThermalDecodeError> for ThermalError {
+    fn from(error: thermal::ThermalDecodeError) -> ThermalError {
+        ThermalError::Decode(error)
+    }
+}
+
+impl From<thermal::ThermalPolicyError> for ThermalError {
+    fn from(error: thermal::ThermalPolicyError) -> ThermalError {
+        ThermalError::Policy(error)
+    }
+}
+
+/// Classify a per-zone failback attempt into the pure outcome the report retains.
+fn zone_outcome(result: Result<(), ThermalError>) -> thermal::ZoneOutcome {
+    match result {
+        Ok(()) => thermal::ZoneOutcome::Restored,
+        Err(error) => {
+            eprintln!("thermal failback for one zone failed: {error:?}");
+            thermal::ZoneOutcome::Failed
+        }
+    }
+}
+
 fn device_file_path() -> String {
     std::env::var("RAZER_DEVICE_FILE")
         .unwrap_or_else(|_| "/usr/share/razercontrol/laptops.json".to_string())
@@ -646,8 +692,24 @@ impl DeviceManager {
 
     pub fn get_actual_fan_rpm(&mut self) -> i32 {
         // IPC boundary: convert to the legacy i32 until Task 9 exposes a typed
-        // status. The transport error is logged, never silently defaulted.
+        // status. The typed error is logged here and never silently defaulted;
+        // Task 9 removes this zero-on-failure conversion.
+        let pid: u16 = match self.get_device() {
+            Some(laptop) => laptop.pid(),
+            None => return 0,
+        };
         if let Some(laptop) = self.get_device() {
+            if pid == thermal::BLADE_16_2025_PID {
+                // The Blade 16 2025 exposes a live tachometer (0x88); read the CPU
+                // zone as the representative fan speed.
+                match laptop.read_current_fan_rpm(thermal::FanId::Cpu) {
+                    Ok(rpm) => return i32::from(rpm.0),
+                    Err(error) => {
+                        eprintln!("get_actual_fan_rpm: tachometer read failed: {error:?}");
+                        return 0;
+                    }
+                }
+            }
             match laptop.read_fan_rpm_from_ec() {
                 Ok(rpm) => return rpm as i32,
                 Err(error) => {
@@ -781,22 +843,50 @@ impl DeviceManager {
             Some(laptop) => laptop.pid(),
             None => return thermal::ThermalSafetyState::Disabled,
         };
-        if pid != thermal::BLADE_16_2025_PID {
-            return thermal::ThermalSafetyState::Ready;
+        let state: thermal::ThermalSafetyState = if pid != thermal::BLADE_16_2025_PID {
+            thermal::ThermalSafetyState::Ready
+        } else {
+            match self.get_device() {
+                Some(laptop) => match laptop.preflight_probe() {
+                    Ok(report) => {
+                        println!("thermal preflight passed: {report:?}");
+                        thermal::ThermalSafetyState::Ready
+                    }
+                    Err(error) => {
+                        eprintln!("thermal preflight failed: {error:?}");
+                        thermal::ThermalSafetyState::Disabled
+                    }
+                },
+                None => thermal::ThermalSafetyState::Disabled,
+            }
+        };
+        // Store the posture so live power/fan writes and the monitor observe it.
+        if let Some(laptop) = self.get_device() {
+            laptop.set_thermal_safety(state);
         }
+        state
+    }
+
+    /// The fixed fan target currently under tachometer monitoring, if any. Used
+    /// by the thermal monitor thread to decide whether a verification cycle is due.
+    pub fn thermal_manual_target(&mut self) -> Option<thermal::FanRpm> {
         match self.get_device() {
-            Some(laptop) => match laptop.preflight_probe() {
-                Ok(report) => {
-                    println!("thermal preflight passed: {report:?}");
-                    thermal::ThermalSafetyState::Ready
-                }
-                Err(error) => {
-                    eprintln!("thermal preflight failed: {error:?}");
-                    thermal::ThermalSafetyState::Disabled
-                }
-            },
-            None => thermal::ThermalSafetyState::Disabled,
+            Some(laptop) => laptop.thermal_manual_target(),
+            None => None,
         }
+    }
+
+    /// Run one fixed-fan verification cycle against the EC (Blade 16 2025).
+    pub fn run_thermal_verification_cycle(&mut self) {
+        if let Some(laptop) = self.get_device() {
+            laptop.run_manual_verification_cycle();
+        }
+    }
+
+    /// Whether the discovered device is the Blade 16 2025, which alone runs the
+    /// verified thermal application and tachometer monitor.
+    pub fn is_blade_16_2025(&mut self) -> bool {
+        self.get_device().map_or(false, |laptop| laptop.pid() == thermal::BLADE_16_2025_PID)
     }
 
     /// Read the current physical power source from UPower. The mode set to sweep
@@ -1043,6 +1133,9 @@ pub struct RazerLaptop {
     ac_state: u8, // index config array
     screensaver: bool,
     transaction_id: u8,
+    // Live thermal-safety posture. Only ever leaves Preflight for the Blade 16
+    // 2025; other models stay in a posture that permits their legacy writes.
+    thermal_safety: thermal::ThermalSafetyState,
 }
 //
 impl RazerLaptop {
@@ -1086,6 +1179,7 @@ impl RazerLaptop {
             ac_state: 0,
             screensaver: false,
             transaction_id: 0,
+            thermal_safety: thermal::ThermalSafetyState::Preflight,
         };
     }
 
@@ -1093,11 +1187,25 @@ impl RazerLaptop {
         return self.pid;
     }
 
+    /// Set the live thermal-safety posture from the preflight result.
+    pub fn set_thermal_safety(&mut self, state: thermal::ThermalSafetyState) {
+        self.thermal_safety = state;
+    }
+
+    fn current_power_source(&self) -> thermal::PowerSource {
+        // ac_state is 1 only when UPower reports line power online.
+        if self.ac_state == 1 {
+            thermal::PowerSource::Ac
+        } else {
+            thermal::PowerSource::Battery
+        }
+    }
+
     pub fn set_screensaver(&mut self, active: bool) {
         self.screensaver = active;
     }
 
-    pub fn set_config(&mut self, config: config::PowerConfig) -> Result<(), TransportError> {
+    pub fn set_config(&mut self, config: config::PowerConfig) -> Result<(), ThermalError> {
         if !self.screensaver {
             self.set_brightness(config.brightness);
             self.set_logo_led_state(config.logo_state);
@@ -1261,10 +1369,29 @@ impl RazerLaptop {
         Ok(())
     }
 
-    pub fn get_cpu_boost(&mut self) -> Result<u8, TransportError> {
+    /// Read a zone's custom CPU/GPU boost level. For the Blade 16 2025 this uses
+    /// the profile-1 0x87 builder with a validated readback; other models keep
+    /// the legacy profile-0 read.
+    pub fn get_cpu_boost(&mut self) -> Result<u8, ThermalError> {
+        self.read_boost(thermal::FanId::Cpu)
+    }
+
+    pub fn get_gpu_boost(&mut self) -> Result<u8, ThermalError> {
+        self.read_boost(thermal::FanId::Gpu)
+    }
+
+    fn read_boost(&mut self, fan: thermal::FanId) -> Result<u8, ThermalError> {
+        if self.pid == thermal::BLADE_16_2025_PID {
+            let reply: [u8; 80] = self.send_thermal(&thermal::get_boost(fan))?;
+            return Ok(thermal::decode_boost(fan, &reply)?);
+        }
+        Ok(self.read_boost_legacy(fan.wire_value())?)
+    }
+
+    fn read_boost_legacy(&mut self, zone: u8) -> Result<u8, TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x87, 0x03);
         report.args[0] = 0x00;
-        report.args[1] = 0x01;
+        report.args[1] = zone;
         report.args[2] = 0x00;
         let response = self.send_report(report)?;
         Ok(response.args[2])
@@ -1282,15 +1409,6 @@ impl RazerLaptop {
         Ok(())
     }
 
-    pub fn get_gpu_boost(&mut self) -> Result<u8, TransportError> {
-        let mut report: RazerPacket = RazerPacket::new(0x0d, 0x87, 0x03);
-        report.args[0] = 0x00;
-        report.args[1] = 0x02;
-        report.args[2] = 0x00;
-        let response = self.send_report(report)?;
-        Ok(response.args[2])
-    }
-
     fn set_gpu_boost(&mut self, boost: u8) -> Result<(), TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x07, 0x03);
         report.args[0] = 0x00;
@@ -1300,7 +1418,20 @@ impl RazerLaptop {
         Ok(())
     }
 
-    pub fn set_power_mode(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), TransportError> {
+    /// Apply a performance mode (and, in Custom, per-zone boost). The Blade 16
+    /// 2025 goes through the verified profile-1 sequence; other models keep the
+    /// legacy profile-0 boost path unchanged.
+    pub fn set_power_mode(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), ThermalError> {
+        if self.pid == thermal::BLADE_16_2025_PID {
+            if self.thermal_safety.writes_disabled() {
+                return Err(ThermalError::WritesDisabled);
+            }
+            return self.apply_power_verified(mode, cpu_boost, gpu_boost);
+        }
+        Ok(self.set_power_mode_legacy(mode, cpu_boost, gpu_boost)?)
+    }
+
+    fn set_power_mode_legacy(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), TransportError> {
         if mode <= 3 {
             self.power = mode;
             self.set_power(0x01)?;
@@ -1310,9 +1441,9 @@ impl RazerLaptop {
             self.fan_rpm = 0;
             self.get_power_mode(0x01)?;
             self.set_power(0x01)?;
-            self.get_cpu_boost()?;
+            self.read_boost_legacy(0x01)?;
             self.set_cpu_boost(cpu_boost)?;
-            self.get_gpu_boost()?;
+            self.read_boost_legacy(0x02)?;
             self.set_gpu_boost(gpu_boost)?;
             self.get_power_mode(0x02)?;
             self.set_power(0x02)?;
@@ -1321,17 +1452,78 @@ impl RazerLaptop {
         Ok(())
     }
 
-    fn set_rpm(&mut self, zone: u8) -> Result<(), TransportError> {
-        let mut report:RazerPacket = RazerPacket::new(0x0d, 0x01, 0x03);
-        // Set fan RPM. profileId=1 matches Synapse's classId (Set Thermal Fan Speed).
-        report.args[0] = 0x01;
-        report.args[1] = zone;
-        report.args[2] = self.fan_rpm;
-        self.send_report(report)?;
+    /// Verified power/boost application (Blade 16 2025). The whole sequence gets
+    /// exactly one bounded second attempt: on a first failure it is retried once,
+    /// after which the failure stands.
+    fn apply_power_verified(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), ThermalError> {
+        match self.apply_power_once(mode, cpu_boost, gpu_boost) {
+            Ok(()) => Ok(()),
+            Err(first) => {
+                eprintln!("verified power apply failed, retrying once: {first:?}");
+                self.apply_power_once(mode, cpu_boost, gpu_boost)
+            }
+        }
+    }
+
+    fn apply_power_once(&mut self, mode_byte: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), ThermalError> {
+        let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(mode_byte)?;
+        let source: thermal::PowerSource = self.current_power_source();
+        if !thermal::is_mode_selectable(source, mode) {
+            return Err(ThermalError::Policy(thermal::ThermalPolicyError::ModeNotSelectable { mode, source }));
+        }
+        self.power = mode_byte;
+        // A fixed fan speed already stored keeps the manual flag set while the
+        // mode is re-written, so the mode change does not silently release it.
+        let manual: bool = self.fan_rpm != 0;
+        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+            self.send_thermal(&thermal::set_fan_mode(fan, mode, manual))?;
+        }
+        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+            let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_mode(fan))?;
+            let (observed_mode, _observed_manual) = thermal::decode_fan_mode(fan, &reply)?;
+            if observed_mode != mode.wire_value() {
+                return Err(ThermalError::ReadbackMismatch {
+                    command_id: 0x82,
+                    requested: mode.wire_value(),
+                    observed: observed_mode,
+                });
+            }
+        }
+        if mode == thermal::PerformanceMode::Custom {
+            let cpu_level: u8 = thermal::validate_custom_level(cpu_boost)?;
+            let gpu_level: u8 = thermal::validate_custom_level(gpu_boost)?;
+            for (fan, level) in [(thermal::FanId::Cpu, cpu_level), (thermal::FanId::Gpu, gpu_level)] {
+                self.send_thermal(&thermal::set_boost(fan, level))?;
+            }
+            for (fan, level) in [(thermal::FanId::Cpu, cpu_level), (thermal::FanId::Gpu, gpu_level)] {
+                let reply: [u8; 80] = self.send_thermal(&thermal::get_boost(fan))?;
+                let observed: u8 = thermal::decode_boost(fan, &reply)?;
+                if observed != level {
+                    return Err(ThermalError::ReadbackMismatch {
+                        command_id: 0x87,
+                        requested: level,
+                        observed,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
-    pub fn set_fan_rpm(&mut self, value: u16) -> Result<(), TransportError> {
+    /// Apply a fan speed. The Blade 16 2025 goes through the verified profile-1
+    /// sequence and arms tachometer monitoring for a fixed speed; other models
+    /// keep the legacy profile-0 path unchanged.
+    pub fn set_fan_rpm(&mut self, value: u16) -> Result<(), ThermalError> {
+        if self.pid == thermal::BLADE_16_2025_PID {
+            if self.thermal_safety.writes_disabled() {
+                return Err(ThermalError::WritesDisabled);
+            }
+            return self.apply_fan_verified(value);
+        }
+        Ok(self.set_fan_rpm_legacy(value)?)
+    }
+
+    fn set_fan_rpm_legacy(&mut self, value: u16) -> Result<(), TransportError> {
         if value == 0 {
             self.fan_rpm = 0;
             self.set_zone_fan_state(0x01, 0x00)?;
@@ -1347,15 +1539,160 @@ impl RazerLaptop {
         Ok(())
     }
 
+    /// Verified fan application (Blade 16 2025), retried once on failure.
+    fn apply_fan_verified(&mut self, value: u16) -> Result<(), ThermalError> {
+        match self.apply_fan_once(value) {
+            Ok(()) => Ok(()),
+            Err(first) => {
+                eprintln!("verified fan apply failed, retrying once: {first:?}");
+                self.apply_fan_once(value)
+            }
+        }
+    }
+
+    fn apply_fan_once(&mut self, value: u16) -> Result<(), ThermalError> {
+        let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(self.power)?;
+        match thermal::validate_fixed_rpm(mode, i32::from(value))? {
+            None => {
+                for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+                    self.send_thermal(&thermal::set_fan_mode(fan, mode, false))?;
+                }
+                self.fan_rpm = 0;
+                self.thermal_safety = thermal::ThermalSafetyState::Ready;
+                Ok(())
+            }
+            Some(target) => {
+                // The 0x01 setter carries rpm/100, so the EC latches (and reads
+                // back) a value rounded to the nearest lower 100 RPM; the monitor
+                // must compare tachometer samples against that commanded value.
+                let commanded_hundreds: u8 = (target.0 / 100) as u8;
+                let commanded_rpm: u16 = u16::from(commanded_hundreds) * 100;
+                for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+                    self.send_thermal(&thermal::set_fan_mode(fan, mode, true))?;
+                }
+                for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+                    self.send_thermal(&thermal::set_fan_speed(fan, thermal::FanRpm(commanded_rpm)))?;
+                }
+                for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+                    let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_speed(fan))?;
+                    let observed: u16 = thermal::decode_fan_setpoint(fan, &reply)?;
+                    if observed != commanded_rpm {
+                        return Err(ThermalError::ReadbackMismatch {
+                            command_id: 0x81,
+                            requested: commanded_hundreds,
+                            observed: (observed / 100) as u8,
+                        });
+                    }
+                }
+                self.fan_rpm = commanded_hundreds;
+                self.thermal_safety = thermal::ThermalSafetyState::Manual {
+                    target: thermal::FanRpm(commanded_rpm),
+                    consecutive_failures: 0,
+                };
+                Ok(())
+            }
+        }
+    }
+
+    /// The fixed fan target currently under tachometer monitoring, if any.
+    pub fn thermal_manual_target(&self) -> Option<thermal::FanRpm> {
+        match self.thermal_safety {
+            thermal::ThermalSafetyState::Manual { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// Run one fixed-fan verification cycle: read both tachometers, classify the
+    /// outcome with the pure state machine, and on the second consecutive failure
+    /// fail both zones back to firmware-automatic control and enter Disabled.
+    pub fn run_manual_verification_cycle(&mut self) {
+        let target: thermal::FanRpm = match self.thermal_safety {
+            thermal::ThermalSafetyState::Manual { target, .. } => target,
+            _ => return,
+        };
+        let event: thermal::VerificationEvent = self.read_manual_cycle_event(target);
+        if let thermal::VerificationEvent::Failed(failure) = event {
+            eprintln!("thermal verification cycle failed: {failure:?}");
+        }
+        let transition: thermal::SafetyTransition = thermal::advance_safety(self.thermal_safety, event);
+        self.thermal_safety = transition.state;
+        if transition.action == Some(thermal::SafetyAction::FailbackBothFans) {
+            let report: thermal::FailbackReport = self.failback_both_fans();
+            eprintln!("thermal failback to firmware-automatic control: {report:?}");
+        }
+    }
+
+    /// Read both zones' current tachometer RPM and classify the cycle. A failed
+    /// read short-circuits to a Transport failure; otherwise each zone's sample
+    /// is classified against the target and the first failure wins.
+    fn read_manual_cycle_event(&mut self, target: thermal::FanRpm) -> thermal::VerificationEvent {
+        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+            match self.read_current_fan_rpm(fan) {
+                Ok(reading) => match thermal::classify_manual_reading(target, reading.0) {
+                    thermal::VerificationEvent::Succeeded => continue,
+                    failed => return failed,
+                },
+                Err(error) => {
+                    // A decode failure means the reply could not be validated for
+                    // its own zone (a stale or cross-zone reply): a readback
+                    // mismatch. Anything else is a transport failure.
+                    let failure: thermal::ThermalFailure = match error {
+                        ThermalError::Decode(_) => thermal::ThermalFailure::ReadbackMismatch,
+                        _ => thermal::ThermalFailure::Transport,
+                    };
+                    eprintln!("thermal telemetry read failed for {fan:?}: {error:?}");
+                    return thermal::VerificationEvent::Failed(failure);
+                }
+            }
+        }
+        thermal::VerificationEvent::Succeeded
+    }
+
+    /// Return both fan zones to firmware-automatic control. The GPU zone is
+    /// attempted even when the CPU zone fails, and both outcomes are retained.
+    fn failback_both_fans(&mut self) -> thermal::FailbackReport {
+        let cpu: Result<(), ThermalError> = self.failback_zone(thermal::FanId::Cpu);
+        let gpu: Result<(), ThermalError> = self.failback_zone(thermal::FanId::Gpu);
+        thermal::FailbackReport { cpu: zone_outcome(cpu), gpu: zone_outcome(gpu) }
+    }
+
+    fn failback_zone(&mut self, fan: thermal::FanId) -> Result<(), ThermalError> {
+        // Returning a zone to firmware-automatic control means clearing the manual
+        // flag while keeping the active performance mode; the EC's own fan curve
+        // then governs the zone. self.power is a validated mode byte set by the
+        // last successful apply.
+        let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(self.power)?;
+        self.send_thermal(&thermal::set_fan_mode(fan, mode, false))?;
+        Ok(())
+    }
+
+    fn set_rpm(&mut self, zone: u8) -> Result<(), TransportError> {
+        let mut report:RazerPacket = RazerPacket::new(0x0d, 0x01, 0x03);
+        // Set fan RPM. profileId=1 matches Synapse's classId (Set Thermal Fan Speed).
+        report.args[0] = 0x01;
+        report.args[1] = zone;
+        report.args[2] = self.fan_rpm;
+        self.send_report(report)?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub fn get_fan_rpm(&mut self) -> u16 {
         let res: u16 = self.fan_rpm as u16;
         return res * 100;
     }
 
-    /// Read fan RPM from EC hardware.
-    /// Note: on many Razer models this returns the configured target,
-    /// not measured tachometer RPM (no tach register exposed via USB HID).
+    /// Read a zone's current tachometer RPM via the profile-1 0x88 builder,
+    /// validating the reply's identity. A transport or decode failure is returned
+    /// as a typed error, never converted into a zero or default reading.
+    pub fn read_current_fan_rpm(&mut self, fan: thermal::FanId) -> Result<thermal::FanRpm, ThermalError> {
+        let reply: [u8; 80] = self.send_thermal(&thermal::get_current_fan_rpm(fan))?;
+        let rpm: u16 = thermal::decode_fan_rpm(fan, &reply)?;
+        Ok(thermal::FanRpm(rpm))
+    }
+
+    /// Read the stored fan setpoint from the EC (profile-1 0x81, CPU zone). Used
+    /// by non-Blade-16 models, which do not expose a live tachometer register.
     pub fn read_fan_rpm_from_ec(&mut self) -> Result<u16, TransportError> {
         self.read_stored_fan_setpoint(0x01)
     }
@@ -1499,11 +1836,13 @@ impl RazerLaptop {
     }
 
     /// Read the currently active performance-mode byte via Get Thermal Fan Mode
-    /// (0x82). args[2] holds the mode; the CPU zone is authoritative for the
-    /// mode-global reading.
-    fn read_active_mode(&mut self) -> Result<u8, TransportError> {
+    /// (0x82). The CPU zone is authoritative for the mode-global reading, and the
+    /// reply's profile/fan identity is validated so a stale reply is never read
+    /// as the active mode.
+    fn read_active_mode(&mut self) -> Result<u8, LimitCollectionError> {
         let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_mode(thermal::FanId::Cpu))?;
-        Ok(reply[2])
+        let (mode_byte, _manual) = thermal::decode_fan_mode(thermal::FanId::Cpu, &reply)?;
+        Ok(mode_byte)
     }
 
     /// Write a performance mode to both zones via Set Thermal Fan Mode (0x02),

@@ -58,6 +58,12 @@ const WAKE_SETTLE_INTERVAL_SECS: u64 = 2;
 // compensate for dropped commands.
 const DGPU_RESUME_REAPPLIES: u32 = 3;
 
+// After a fixed fan speed is applied on the Blade 16 2025, let the fans spin up
+// before the first tachometer check, then verify every couple of seconds. A
+// fresh fixed target restarts the settling window.
+const THERMAL_MONITOR_SETTLE_SECS: u64 = 5;
+const THERMAL_MONITOR_POLL_SECS: u64 = 2;
+
 lazy_static! {
     static ref EFFECT_MANAGER: Mutex<kbd::EffectManager> = Mutex::new(kbd::EffectManager::new());
     // static ref CONFIG: Mutex<config::Configuration> = {
@@ -125,16 +131,14 @@ fn run_preflight_only() {
             std::process::exit(1);
         }
     };
-    match state {
-        thermal::ThermalSafetyState::Ready => {
-            println!("thermal preflight passed");
-            std::process::exit(0);
-        }
-        thermal::ThermalSafetyState::Disabled => {
-            eprintln!("thermal preflight failed");
-            std::process::exit(1);
-        }
+    // preflight() only ever returns Ready or Disabled; any non-Ready posture is
+    // treated as a failed sweep for exit-status purposes.
+    if state == thermal::ThermalSafetyState::Ready {
+        println!("thermal preflight passed");
+        std::process::exit(0);
     }
+    eprintln!("thermal preflight failed");
+    std::process::exit(1);
 }
 
 /// `--collect-thermal-limits`: run the supervised mode-global limit sweep and
@@ -192,17 +196,19 @@ fn run_service() {
         use battery::OrgFreedesktopUPowerDevice;
         if let Ok(online) = proxy_ac.online() {
             println!("Online AC0: {:?}", online);
-            match safety {
-                thermal::ThermalSafetyState::Ready => d.set_ac_state(online),
-                thermal::ThermalSafetyState::Disabled => d.set_ac_index(online),
+            // Ready applies the saved profile; any other posture (Disabled after a
+            // failed sweep) only tracks the AC index and withholds power writes.
+            if safety == thermal::ThermalSafetyState::Ready {
+                d.set_ac_state(online);
+            } else {
+                d.set_ac_index(online);
             }
             d.restore_standard_effect();
             // Disabled means no saved thermal/power state may reach the EC; BHO restore is a power write.
-            match safety {
-                thermal::ThermalSafetyState::Ready => d.restore_bho(),
-                thermal::ThermalSafetyState::Disabled => {
-                    eprintln!("thermal preflight failed: skipping BHO restore")
-                }
+            if safety == thermal::ThermalSafetyState::Ready {
+                d.restore_bho();
+            } else {
+                eprintln!("thermal preflight failed: skipping BHO restore");
             }
             // Only load per-key RGB effects if device supports custom frames.
             // Sending custom frame HID reports to unsupported devices can
@@ -242,6 +248,15 @@ fn run_service() {
     start_screensaver_monitor_task();
     start_battery_monitor_task();
     start_dgpu_resume_watch_task();
+    // The tachometer monitor only applies to the Blade 16 2025; other models have
+    // no fixed-fan verification to run.
+    let run_thermal_monitor: bool = match DEV_MANAGER.lock() {
+        Ok(mut d) => d.is_blade_16_2025(),
+        Err(_) => false,
+    };
+    if run_thermal_monitor {
+        start_thermal_monitor_task();
+    }
     let clean_thread = start_shutdown_task();
 
     if let Some(listener) = comms::create() {
@@ -466,6 +481,50 @@ fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
                 reapplies_remaining -= 1;
             }
             was_active = active;
+        }
+    })
+}
+
+/// Verifies applied fixed fan speeds against the Blade 16 2025 tachometer and
+/// fails both fans back to firmware-automatic control on repeated failure.
+///
+/// The lock is never held across a sleep: each tick reads whether a fixed target
+/// is armed, and only re-locks to run a verification cycle. A newly-applied fixed
+/// target restarts a settling window (`THERMAL_MONITOR_SETTLE_SECS`) before its
+/// first check; the pure decision lives in `thermal::advance_safety`.
+fn start_thermal_monitor_task() -> JoinHandle<()> {
+    thread::spawn(|| {
+        let settle = time::Duration::from_secs(THERMAL_MONITOR_SETTLE_SECS);
+        let poll = time::Duration::from_secs(THERMAL_MONITOR_POLL_SECS);
+        let mut watching: Option<(thermal::FanRpm, time::Instant)> = None;
+        loop {
+            thread::sleep(poll);
+            let target = match DEV_MANAGER.lock() {
+                Ok(mut d) => d.thermal_manual_target(),
+                Err(_) => continue,
+            };
+            let target = match target {
+                Some(target) => target,
+                None => {
+                    watching = None;
+                    continue;
+                }
+            };
+            match watching {
+                Some((watched, settle_deadline)) if watched == target => {
+                    if time::Instant::now() < settle_deadline {
+                        continue; // still inside this target's settling window
+                    }
+                }
+                _ => {
+                    // Newly-applied (or changed) fixed target: start its window.
+                    watching = Some((target, time::Instant::now() + settle));
+                    continue;
+                }
+            }
+            if let Ok(mut d) = DEV_MANAGER.lock() {
+                d.run_thermal_verification_cycle();
+            }
         }
     })
 }

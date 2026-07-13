@@ -83,9 +83,11 @@ impl TryFrom<u8> for PerformanceMode {
     }
 }
 
-/// A validated fixed manual fan speed in RPM. Never constructed from an
-/// out-of-range request; zero never reaches this type (zero selects firmware
-/// automatic control).
+/// A fan speed in RPM. As a validated fixed manual *target* it is never
+/// constructed from an out-of-range request and is never zero (zero selects
+/// firmware automatic control). The same newtype also carries a raw 0x88
+/// tachometer *sample*, which may read zero when a fan has stopped;
+/// `classify_manual_reading` treats such a zero as a distinct failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FanRpm(pub u16);
 
@@ -347,6 +349,36 @@ fn decode_fan_id_byte(raw: u8, index: usize) -> Result<FanId, ThermalDecodeError
 /// rpm/100]`. Rejects a reply whose profile or fan byte does not match the
 /// request so a stale reply is never read as the requested zone.
 pub fn decode_fan_rpm(fan: FanId, args: &[u8; 80]) -> Result<u16, ThermalDecodeError> {
+    verify_reply_identity(fan, args)?;
+    Ok(u16::from(args[2]) * 100)
+}
+
+/// Decode a 0x82 Get Thermal Fan Mode reply: `[profile=1, fan_id, mode,
+/// manual_flag]`. Rejects a reply whose profile or fan byte does not match the
+/// request so a stale reply is never trusted as this zone's mode.
+pub fn decode_fan_mode(fan: FanId, args: &[u8; 80]) -> Result<(u8, u8), ThermalDecodeError> {
+    verify_reply_identity(fan, args)?;
+    Ok((args[2], args[3]))
+}
+
+/// Decode a 0x87 Get Custom CPU/GPU Level reply: `[profile=1, fan_id, level]`.
+/// Rejects a reply whose profile or fan byte does not match the request.
+pub fn decode_boost(fan: FanId, args: &[u8; 80]) -> Result<u8, ThermalDecodeError> {
+    verify_reply_identity(fan, args)?;
+    Ok(args[2])
+}
+
+/// Decode a 0x81 Get Thermal Fan Speed reply: `[profile=1, fan_id, rpm/100]`,
+/// returning the stored setpoint in RPM. Rejects a reply whose profile or fan
+/// byte does not match the request.
+pub fn decode_fan_setpoint(fan: FanId, args: &[u8; 80]) -> Result<u16, ThermalDecodeError> {
+    verify_reply_identity(fan, args)?;
+    Ok(u16::from(args[2]) * 100)
+}
+
+/// Reject a per-fan reply whose profile byte or fan byte does not match the
+/// request, so a stale or cross-zone reply is never read as this zone's value.
+fn verify_reply_identity(fan: FanId, args: &[u8; 80]) -> Result<(), ThermalDecodeError> {
     if args[0] != THERMAL_PROFILE {
         return Err(ThermalDecodeError::UnexpectedProfile { expected: THERMAL_PROFILE, actual: args[0] });
     }
@@ -354,7 +386,7 @@ pub fn decode_fan_rpm(fan: FanId, args: &[u8; 80]) -> Result<u16, ThermalDecodeE
     if args[1] != expected_fan {
         return Err(ThermalDecodeError::UnexpectedFan { expected: expected_fan, actual: args[1] });
     }
-    Ok(u16::from(args[2]) * 100)
+    Ok(())
 }
 
 /// Decode a 0x86 Get Thermal Fan Information reply. Minimum, default, and
@@ -431,13 +463,143 @@ pub fn resolve_with_restoration<T, E>(
     }
 }
 
-/// The safety posture after preflight. Task 7 formalizes the full state machine
-/// (adding Preflight/Manual); this task needs only the pass/fail outcome that
-/// gates automatic saved-state application.
+/// The daemon's live thermal-safety posture.
+///
+/// - `Preflight`: initial posture before the getter-only sweep has decided.
+/// - `Ready`: the EC answered preflight and no fixed fan speed is being watched.
+/// - `Manual`: a fixed fan speed is applied and its tachometer is being verified
+///   each monitoring cycle; `consecutive_failures` counts back-to-back failed
+///   cycles and resets to zero on any passing cycle.
+/// - `Disabled`: preflight failed, or failback fired after two consecutive
+///   failures; every power/fan write is refused before command construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalSafetyState {
+    Preflight,
     Ready,
+    Manual { target: FanRpm, consecutive_failures: u8 },
     Disabled,
+}
+
+impl ThermalSafetyState {
+    /// Whether the daemon must refuse every power/fan write. True only in
+    /// `Disabled`, the terminal posture entered after failback or a failed
+    /// preflight.
+    pub fn writes_disabled(self) -> bool {
+        matches!(self, ThermalSafetyState::Disabled)
+    }
+}
+
+/// Two consecutive failed verification cycles trip failback. One failure is a
+/// transient the next passing cycle clears; the second in a row is treated as a
+/// real loss of fan control.
+const FAILBACK_FAILURE_THRESHOLD: u8 = 2;
+
+/// The outcome of one verification cycle, fed to `advance_safety`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationEvent {
+    Succeeded,
+    Failed(ThermalFailure),
+}
+
+/// A verification failure classified for the pure safety state machine. The
+/// device layer logs the full typed transport/decode error and maps it to one
+/// of these classes; `advance_safety` only needs the class, not the detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalFailure {
+    /// A command did not complete over the HID transport, or a reply could not
+    /// be decoded for its own zone.
+    Transport,
+    /// A readback could not be validated for its own zone (a stale or
+    /// cross-zone reply). The full typed decode error is logged at the edge; the
+    /// state machine only needs the class.
+    ReadbackMismatch,
+    /// A tachometer sample read back as zero while a fixed speed was commanded.
+    TelemetryZero,
+    /// A tachometer sample deviated from the fixed target beyond tolerance.
+    ExcessiveDeviation { target: u16, observed: u16, tolerance: u16 },
+}
+
+/// The corrective action a transition requests. Failback returns both fan zones
+/// to firmware-automatic control; it is the only action the machine emits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyAction {
+    FailbackBothFans,
+}
+
+/// The next state plus any corrective action the caller must perform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SafetyTransition {
+    pub state: ThermalSafetyState,
+    pub action: Option<SafetyAction>,
+}
+
+/// Advance the safety state machine for one verification cycle. Pure: it decides
+/// the next state and whether failback must run, and performs no I/O.
+///
+/// Only the `Manual` posture is monitored. A passing cycle clears the failure
+/// counter; a failing cycle increments it, and the second consecutive failure
+/// transitions to `Disabled` while requesting `FailbackBothFans`. Every other
+/// posture is a fixed point: the state is returned unchanged with no action.
+pub fn advance_safety(state: ThermalSafetyState, event: VerificationEvent) -> SafetyTransition {
+    let (target, consecutive_failures) = match state {
+        ThermalSafetyState::Manual { target, consecutive_failures } => (target, consecutive_failures),
+        other => return SafetyTransition { state: other, action: None },
+    };
+    match event {
+        VerificationEvent::Succeeded => SafetyTransition {
+            state: ThermalSafetyState::Manual { target, consecutive_failures: 0 },
+            action: None,
+        },
+        VerificationEvent::Failed(_) => {
+            let failures: u8 = consecutive_failures.saturating_add(1);
+            if failures >= FAILBACK_FAILURE_THRESHOLD {
+                SafetyTransition {
+                    state: ThermalSafetyState::Disabled,
+                    action: Some(SafetyAction::FailbackBothFans),
+                }
+            } else {
+                SafetyTransition {
+                    state: ThermalSafetyState::Manual { target, consecutive_failures: failures },
+                    action: None,
+                }
+            }
+        }
+    }
+}
+
+/// Classify one fixed-mode tachometer reading against its commanded target. A
+/// zero sample (fan stopped) and a sample outside `manual_tolerance` are
+/// distinct failures; a sample inside tolerance passes. Pure so the monitoring
+/// decision is unit-tested independent of HID I/O.
+pub fn classify_manual_reading(target: FanRpm, observed: u16) -> VerificationEvent {
+    if observed == 0 {
+        return VerificationEvent::Failed(ThermalFailure::TelemetryZero);
+    }
+    let tolerance: u16 = manual_tolerance(target.0);
+    if observed.abs_diff(target.0) > tolerance {
+        return VerificationEvent::Failed(ThermalFailure::ExcessiveDeviation {
+            target: target.0,
+            observed,
+            tolerance,
+        });
+    }
+    VerificationEvent::Succeeded
+}
+
+/// The outcome of returning one fan zone to firmware-automatic control during
+/// failback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoneOutcome {
+    Restored,
+    Failed,
+}
+
+/// The result of a two-zone failback. Both zones are always attempted, so both
+/// outcomes are retained even when the first zone fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailbackReport {
+    pub cpu: ZoneOutcome,
+    pub gpu: ZoneOutcome,
 }
 
 /// How the daemon binary was invoked. The three modes are mutually exclusive and
@@ -643,6 +805,134 @@ mod tests {
         assert_eq!(manual_tolerance(4000), 1000);
         assert_eq!(manual_tolerance(5400), 1350);
         assert_eq!(manual_tolerance(1000), 500);
+    }
+
+    #[test]
+    fn failure_then_success_resets_the_counter() {
+        let initial: ThermalSafetyState =
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 };
+        let failed: SafetyTransition =
+            advance_safety(initial, VerificationEvent::Failed(ThermalFailure::TelemetryZero));
+        assert_eq!(
+            failed.state,
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 1 }
+        );
+        assert_eq!(failed.action, None);
+        let recovered: SafetyTransition = advance_safety(failed.state, VerificationEvent::Succeeded);
+        assert_eq!(
+            recovered.state,
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 }
+        );
+        assert_eq!(recovered.action, None);
+    }
+
+    #[test]
+    fn two_consecutive_failures_request_failback_and_disable() {
+        let initial: ThermalSafetyState =
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 };
+        let first: SafetyTransition =
+            advance_safety(initial, VerificationEvent::Failed(ThermalFailure::TelemetryZero));
+        let second: SafetyTransition =
+            advance_safety(first.state, VerificationEvent::Failed(ThermalFailure::TelemetryZero));
+        assert_eq!(second.action, Some(SafetyAction::FailbackBothFans));
+        assert_eq!(second.state, ThermalSafetyState::Disabled);
+    }
+
+    #[test]
+    fn disabled_rejects_every_later_write() {
+        assert!(ThermalSafetyState::Disabled.writes_disabled());
+        assert!(!ThermalSafetyState::Ready.writes_disabled());
+        assert!(!ThermalSafetyState::Preflight.writes_disabled());
+        assert!(!ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 1 }
+            .writes_disabled());
+        // Disabled is terminal: any further event keeps it Disabled with no action.
+        let after: SafetyTransition = advance_safety(
+            ThermalSafetyState::Disabled,
+            VerificationEvent::Failed(ThermalFailure::Transport),
+        );
+        assert_eq!(after.state, ThermalSafetyState::Disabled);
+        assert_eq!(after.action, None);
+    }
+
+    #[test]
+    fn failback_report_retains_both_results_when_cpu_fails() {
+        let report: FailbackReport =
+            FailbackReport { cpu: ZoneOutcome::Failed, gpu: ZoneOutcome::Restored };
+        // The GPU zone is attempted even though the CPU zone failed, so both
+        // outcomes are retained.
+        assert_eq!(report.cpu, ZoneOutcome::Failed);
+        assert_eq!(report.gpu, ZoneOutcome::Restored);
+    }
+
+    #[test]
+    fn classifies_manual_reading_within_and_beyond_tolerance() {
+        let cases: [(u16, u16); 3] = [(3400, 850), (4000, 1000), (5400, 1350)];
+        for (target, tolerance) in cases {
+            assert_eq!(manual_tolerance(target), tolerance);
+            assert_eq!(
+                classify_manual_reading(FanRpm(target), target),
+                VerificationEvent::Succeeded
+            );
+            assert_eq!(
+                classify_manual_reading(FanRpm(target), target + tolerance),
+                VerificationEvent::Succeeded
+            );
+            assert_eq!(
+                classify_manual_reading(FanRpm(target), target - tolerance),
+                VerificationEvent::Succeeded
+            );
+            assert_eq!(
+                classify_manual_reading(FanRpm(target), target + tolerance + 1),
+                VerificationEvent::Failed(ThermalFailure::ExcessiveDeviation {
+                    target,
+                    observed: target + tolerance + 1,
+                    tolerance,
+                })
+            );
+            assert_eq!(
+                classify_manual_reading(FanRpm(target), 0),
+                VerificationEvent::Failed(ThermalFailure::TelemetryZero)
+            );
+        }
+    }
+
+    #[test]
+    fn decodes_fan_mode_with_identity_check() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..4].copy_from_slice(&[1, 1, 4, 1]);
+        assert_eq!(decode_fan_mode(FanId::Cpu, &args), Ok((4, 1)));
+        assert_eq!(
+            decode_fan_mode(FanId::Gpu, &args),
+            Err(ThermalDecodeError::UnexpectedFan { expected: 2, actual: 1 })
+        );
+        args[0] = 0;
+        assert_eq!(
+            decode_fan_mode(FanId::Cpu, &args),
+            Err(ThermalDecodeError::UnexpectedProfile { expected: 1, actual: 0 })
+        );
+    }
+
+    #[test]
+    fn decodes_boost_with_identity_check() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[1, 2, 2]);
+        assert_eq!(decode_boost(FanId::Gpu, &args), Ok(2));
+        assert_eq!(
+            decode_boost(FanId::Cpu, &args),
+            Err(ThermalDecodeError::UnexpectedFan { expected: 1, actual: 2 })
+        );
+    }
+
+    #[test]
+    fn decodes_fan_setpoint_with_identity_check() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[1, 1, 34]);
+        assert_eq!(decode_fan_setpoint(FanId::Cpu, &args), Ok(3400));
+        args[0] = 2;
+        assert_eq!(
+            decode_fan_setpoint(FanId::Cpu, &args),
+            Err(ThermalDecodeError::UnexpectedProfile { expected: 1, actual: 2 })
+        );
     }
 
     #[test]
