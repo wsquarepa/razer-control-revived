@@ -61,19 +61,52 @@ impl RazerPacket {
         };
     }
 
-    fn calc_crc(&mut self) -> Vec<u8>{
-        let mut buf: Vec<u8> = bincode::serialize(self).unwrap();
-        // Razer CRC = XOR of the 90-byte report's bytes [2..88). Index 0 of this struct
-        // is the prepended HID report-id, so that range maps to buf[3..89]; the crc byte
-        // itself sits at buf[89].
-        let mut res: u8 = 0x00;
-        for i in 3..89 {
-            res ^= buf[i];
+    /// Serialize to the 91-byte HID feature report, computing the Razer CRC.
+    /// Pure: does not mutate the packet. The CRC = XOR of the 90-byte report's
+    /// bytes [2..88); index 0 of this struct is the prepended HID report-id, so
+    /// that range maps to buf[3..89] and the crc byte itself sits at buf[89].
+    fn serialize(&self) -> Result<[u8; 91], TransportError> {
+        let mut buf: Vec<u8> = bincode::serialize(self).map_err(|error| {
+            TransportError::Serialization {
+                command_class: self.command_class,
+                command_id: self.command_id,
+                detail: error.to_string(),
+            }
+        })?;
+        let mut crc: u8 = 0x00;
+        for byte in &buf[3..89] {
+            crc ^= *byte;
         }
-        self.crc = res;
-        buf[89] = res;
-        return buf;
+        buf[89] = crc;
+        buf.try_into().map_err(|buf: Vec<u8>| TransportError::Serialization {
+            command_class: self.command_class,
+            command_id: self.command_id,
+            detail: format!("serialized packet was {} bytes, expected 91", buf.len()),
+        })
     }
+}
+
+/// A typed failure from the HID feature-report transport. Every variant carries
+/// enough context (device PID, transaction id, command class/id, EC status,
+/// attempt count) to debug a failure without re-deriving it from logs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportError {
+    /// bincode failed to encode the request, or the encoded length was not 91.
+    Serialization { command_class: u8, command_id: u8, detail: String },
+    /// The HID write (send_feature_report) failed.
+    Write { pid: u16, transaction_id: u8, command_class: u8, command_id: u8, detail: String },
+    /// The HID read (get_feature_report) failed.
+    Read { pid: u16, transaction_id: u8, command_class: u8, command_id: u8, detail: String },
+    /// The EC returned a report of an unexpected length.
+    Size { pid: u16, command_class: u8, command_id: u8, size: usize },
+    /// The reply bytes could not be decoded into a packet.
+    Decode { pid: u16, command_class: u8, command_id: u8, detail: String },
+    /// The EC reported the command is not supported.
+    Unsupported { pid: u16, command_class: u8, command_id: u8 },
+    /// The EC reported an explicit failure status for the command.
+    CommandFailure { pid: u16, transaction_id: u8, command_class: u8, command_id: u8, status: u8 },
+    /// Write and read attempts were exhausted while the EC stayed busy.
+    ExhaustedPolls { pid: u16, command_class: u8, command_id: u8, attempts: usize },
 }
 
 fn device_file_path() -> String {
@@ -342,7 +375,13 @@ impl DeviceManager {
             ac, config.power_mode, config.cpu_boost, config.gpu_boost
         );
         match self.get_device() {
-            Some(laptop) => laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost),
+            Some(laptop) => match laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!("reapply_power_mode: set_power_mode failed: {error:?}");
+                    false
+                }
+            },
             None => false,
         }
     }
@@ -366,7 +405,7 @@ impl DeviceManager {
             let hw_cpu = laptop.get_cpu_boost();
             let hw_gpu = laptop.get_gpu_boost();
             println!(
-                "[verify {}] ac={} cfg(mode={} cpu={} gpu={}) hw(mode_z1={} mode_z2={} cpu={} gpu={})",
+                "[verify {}] ac={} cfg(mode={} cpu={} gpu={}) hw(mode_z1={:?} mode_z2={:?} cpu={:?} gpu={:?})",
                 context, ac, cfg_mode, cfg_cpu, cfg_gpu, hw_mode_z1, hw_mode_z2, hw_cpu, hw_gpu
             );
         }
@@ -387,7 +426,13 @@ impl DeviceManager {
             if state != ac {
                 res = true;
             } else {
-                res = laptop.set_power_mode(pwr, cpu, gpu);
+                res = match laptop.set_power_mode(pwr, cpu, gpu) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!("set_power_mode failed: {error:?}");
+                        false
+                    }
+                };
             }
         }
 
@@ -440,7 +485,13 @@ impl DeviceManager {
             if state != ac {
                 res = true;
             } else {
-                res = laptop.set_fan_rpm(rpm as u16);
+                res = match laptop.set_fan_rpm(rpm as u16) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!("set_fan_rpm failed: {error:?}");
+                        false
+                    }
+                };
             }
         }
 
@@ -534,8 +585,16 @@ impl DeviceManager {
     }
 
     pub fn get_actual_fan_rpm(&mut self) -> i32 {
+        // IPC boundary: convert to the legacy i32 until Task 9 exposes a typed
+        // status. The transport error is logged, never silently defaulted.
         if let Some(laptop) = self.get_device() {
-            return laptop.read_fan_rpm_from_ec() as i32;
+            match laptop.read_fan_rpm_from_ec() {
+                Ok(rpm) => return rpm as i32,
+                Err(error) => {
+                    eprintln!("get_actual_fan_rpm: EC read failed: {error:?}");
+                    return 0;
+                }
+            }
         }
         return 0;
     }
@@ -545,7 +604,13 @@ impl DeviceManager {
             if let Some(laptop) = self.get_device() {
                 let state = laptop.get_ac_state();
                 if state == ac {
-                    laptop.read_fan_setting().map(|rpm| rpm as i32)
+                    match laptop.read_fan_setting() {
+                        Ok(rpm) => Some(rpm as i32),
+                        Err(error) => {
+                            eprintln!("get_fan_rpm: live read failed: {error:?}");
+                            None
+                        }
+                    }
                 } else {
                     None
                 }
@@ -597,7 +662,9 @@ impl DeviceManager {
         let config: Option<config::PowerConfig> = self.get_ac_config(ac as usize);
         if let Some(config) = config {
             if let Some(laptop) = self.get_device() {
-                laptop.set_config(config);
+                if let Err(error) = laptop.set_config(config) {
+                    eprintln!("set_ac_state: apply config failed: {error:?}");
+                }
             }
         }
     }
@@ -624,7 +691,9 @@ impl DeviceManager {
                     online, config.power_mode, config.cpu_boost, config.gpu_boost
                 );
                 if let Some(laptop) = self.get_device() {
-                    laptop.set_config(config);
+                    if let Err(error) = laptop.set_config(config) {
+                        eprintln!("set_ac_state_get: apply config failed: {error:?}");
+                    }
                 }
             }
         } else {
@@ -889,20 +958,17 @@ impl RazerLaptop {
         self.screensaver = active;
     }
 
-    pub fn set_config(&mut self, config: config::PowerConfig) -> bool {
-        let mut ret: bool = false;
-
+    pub fn set_config(&mut self, config: config::PowerConfig) -> Result<(), TransportError> {
         if !self.screensaver {
-            ret |= self.set_brightness(config.brightness);
-            ret |= self.set_logo_led_state(config.logo_state);
+            self.set_brightness(config.brightness);
+            self.set_logo_led_state(config.logo_state);
         } else {
-            ret |= self.set_brightness(0);
-            ret |= self.set_logo_led_state(0);
+            self.set_brightness(0);
+            self.set_logo_led_state(0);
         }
-        ret |= self.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost);
-        ret |= self.set_fan_rpm(config.fan_rpm as u16);
-
-        return ret;
+        self.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost)?;
+        self.set_fan_rpm(config.fan_rpm as u16)?;
+        Ok(())
     }
 
     pub fn set_ac_state(&mut self, online: bool) -> usize {
@@ -958,7 +1024,7 @@ impl RazerLaptop {
                 report.args[idx+1] = params[idx];
             }
         }
-        if let Some(_) = self.send_report(report) {
+        if let Some(_) = self.send_report_logging(report) {
             return true;
         }
 
@@ -976,7 +1042,7 @@ impl RazerLaptop {
             for idx in 0..data.len() {
                 report.args[idx + 7] = data[idx];
             }
-            self.send_report(report);
+            self.send_report_logging(report);
         }
     }
 
@@ -984,29 +1050,27 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x03, 0x0a, 0x02);
         report.args[0] = RazerLaptop::CUSTOMFRAME; // effect id
         report.args[1] = RazerLaptop::NOSTORE;
-        if let Some(_) = self.send_report(report) {
+        if let Some(_) = self.send_report_logging(report) {
             return true;
         }
 
         return false;
     }
 
-    pub fn get_power_mode(&mut self, zone: u8) -> u8 {
-        if let Some((mode_byte, _manual_flag)) = self.read_zone_fan_state(zone) {
-            return mode_byte;
-        }
-        return 0;
+    pub fn get_power_mode(&mut self, zone: u8) -> Result<u8, TransportError> {
+        let (mode_byte, _manual_flag) = self.read_zone_fan_state(zone)?;
+        Ok(mode_byte)
     }
 
-    fn read_zone_fan_state(&mut self, zone: u8) -> Option<(u8, u8)> {
+    fn read_zone_fan_state(&mut self, zone: u8) -> Result<(u8, u8), TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x82, 0x04);
         // profileId=1 must match the write paths so readback queries the same slot.
         report.args[0] = 0x01;
         report.args[1] = zone;
         report.args[2] = 0x00;
         report.args[3] = 0x00;
-        self.send_report(report)
-            .map(|response| (response.args[2], response.args[3]))
+        let response = self.send_report(report)?;
+        Ok((response.args[2], response.args[3]))
     }
 
     /// Set a fan zone's mode via Set Thermal Fan Mode (0x0d/0x02).
@@ -1016,34 +1080,35 @@ impl RazerLaptop {
     /// here writes the setting to an inactive slot. Using `self.power` keeps the
     /// write on the same slot `set_power()` activates.
     /// `manual_flag` (args[3]): 1 = manual, 0 = auto.
-    fn set_zone_fan_state(&mut self, zone: u8, manual_flag: u8) -> bool {
+    fn set_zone_fan_state(&mut self, zone: u8, manual_flag: u8) -> Result<(), TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x02, 0x04);
         report.args[0] = 0x01;
         report.args[1] = zone;
         report.args[2] = self.power;
         report.args[3] = manual_flag;
-        self.send_report(report).is_some()
+        self.send_report(report)?;
+        Ok(())
     }
 
-    fn read_stored_fan_setpoint(&mut self, zone: u8) -> Option<u16> {
+    fn read_stored_fan_setpoint(&mut self, zone: u8) -> Result<u16, TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x81, 0x03);
         // profileId=1 must match the write paths so readback queries the same slot.
         report.args[0] = 0x01;
         report.args[1] = zone;
         report.args[2] = 0x00;
-        self.send_report(report)
-            .map(|response| response.args[2] as u16 * 100)
+        let response = self.send_report(report)?;
+        Ok(u16::from(response.args[2]) * 100)
     }
 
-    pub fn read_fan_setting(&mut self) -> Option<u16> {
+    pub fn read_fan_setting(&mut self) -> Result<u16, TransportError> {
         let (_mode_byte, manual_flag) = self.read_zone_fan_state(0x01)?;
         if manual_flag == 0 {
-            return Some(0);
+            return Ok(0);
         }
         self.read_stored_fan_setpoint(0x01)
     }
 
-    fn set_power(&mut self, zone: u8) -> bool {
+    fn set_power(&mut self, zone: u8) -> Result<(), TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x02, 0x04);
         // profileId=1 must match set_zone_fan_state so byte0 does not thrash 0<->1.
         report.args[0] = 0x01;
@@ -1053,25 +1118,20 @@ impl RazerLaptop {
             0 => report.args[3] = 0x00,
             _ => report.args[3] = 0x01
         }
-        if let Some(_) = self.send_report(report) {
-            return  true;
-        }
-
-        return false;
+        self.send_report(report)?;
+        Ok(())
     }
 
-    pub fn get_cpu_boost(&mut self) -> u8 {
+    pub fn get_cpu_boost(&mut self) -> Result<u8, TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x87, 0x03);
         report.args[0] = 0x00;
         report.args[1] = 0x01;
         report.args[2] = 0x00;
-        if let Some(response) = self.send_report(report) {
-            return response.args[2];
-        }
-        return 0;
+        let response = self.send_report(report)?;
+        Ok(response.args[2])
     }
 
-    fn set_cpu_boost(&mut self, mut boost: u8) -> bool {
+    fn set_cpu_boost(&mut self, mut boost: u8) -> Result<(), TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x07, 0x03);
         if boost == 3 && !self.have_feature("boost".to_string()) {
             boost = 2;
@@ -1079,84 +1139,73 @@ impl RazerLaptop {
         report.args[0] = 0x00;
         report.args[1] = 0x01;
         report.args[2] = boost;
-        if let Some(_)= self.send_report(report) {
-            return true;
-        }
-
-        return false;
+        self.send_report(report)?;
+        Ok(())
     }
 
-    pub fn get_gpu_boost(&mut self) -> u8 {
+    pub fn get_gpu_boost(&mut self) -> Result<u8, TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x87, 0x03);
         report.args[0] = 0x00;
         report.args[1] = 0x02;
         report.args[2] = 0x00;
-        if let Some(response) = self.send_report(report){
-            return response.args[2];
-        }
-        return 0;
+        let response = self.send_report(report)?;
+        Ok(response.args[2])
     }
 
-    fn set_gpu_boost(&mut self, boost: u8) -> bool {
+    fn set_gpu_boost(&mut self, boost: u8) -> Result<(), TransportError> {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x07, 0x03);
         report.args[0] = 0x00;
         report.args[1] = 0x02;
         report.args[2] = boost;
-        if let Some(_) = self.send_report(report) {
-            return true;
-        }
-        return false;
+        self.send_report(report)?;
+        Ok(())
     }
 
-    pub fn set_power_mode(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> bool {
+    pub fn set_power_mode(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), TransportError> {
         if mode <= 3 {
             self.power = mode;
-            self.set_power(0x01);
-            self.set_power(0x02);
+            self.set_power(0x01)?;
+            self.set_power(0x02)?;
         } else if mode == 4 {
             self.power =  mode;
             self.fan_rpm = 0;
-            self.get_power_mode(0x01);
-            self.set_power(0x01);
-            self.get_cpu_boost();
-            self.set_cpu_boost(cpu_boost);
-            self.get_gpu_boost();
-            self.set_gpu_boost(gpu_boost);
-            self.get_power_mode(0x02);
-            self.set_power(0x02);
+            self.get_power_mode(0x01)?;
+            self.set_power(0x01)?;
+            self.get_cpu_boost()?;
+            self.set_cpu_boost(cpu_boost)?;
+            self.get_gpu_boost()?;
+            self.set_gpu_boost(gpu_boost)?;
+            self.get_power_mode(0x02)?;
+            self.set_power(0x02)?;
         }
 
-        return true;
+        Ok(())
     }
 
-    fn set_rpm(&mut self, zone: u8) -> bool {
+    fn set_rpm(&mut self, zone: u8) -> Result<(), TransportError> {
         let mut report:RazerPacket = RazerPacket::new(0x0d, 0x01, 0x03);
         // Set fan RPM. profileId=1 matches Synapse's classId (Set Thermal Fan Speed).
         report.args[0] = 0x01;
         report.args[1] = zone;
         report.args[2] = self.fan_rpm;
-        if let Some(_) = self.send_report(report) {
-            return true;
-        }
-
-        return false;
+        self.send_report(report)?;
+        Ok(())
     }
 
-    pub fn set_fan_rpm(&mut self, value: u16) -> bool {
+    pub fn set_fan_rpm(&mut self, value: u16) -> Result<(), TransportError> {
         if value == 0 {
             self.fan_rpm = 0;
-            let zone1 = self.set_zone_fan_state(0x01, 0x00);
-            let zone2 = self.set_zone_fan_state(0x02, 0x00);
-            return zone1 && zone2;
+            self.set_zone_fan_state(0x01, 0x00)?;
+            self.set_zone_fan_state(0x02, 0x00)?;
+            return Ok(());
         }
 
         self.fan_rpm = self.clamp_fan(value);
-        let zone1 = self.set_zone_fan_state(0x01, 0x01);
-        let zone2 = self.set_zone_fan_state(0x02, 0x01);
-        let fan1 = self.set_rpm(0x01);
-        let fan2 = self.set_rpm(0x02);
-
-        return zone1 && zone2 && fan1 && fan2;
+        self.set_zone_fan_state(0x01, 0x01)?;
+        self.set_zone_fan_state(0x02, 0x01)?;
+        self.set_rpm(0x01)?;
+        self.set_rpm(0x02)?;
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -1168,11 +1217,8 @@ impl RazerLaptop {
     /// Read fan RPM from EC hardware.
     /// Note: on many Razer models this returns the configured target,
     /// not measured tachometer RPM (no tach register exposed via USB HID).
-    pub fn read_fan_rpm_from_ec(&mut self) -> u16 {
-        if let Some(rpm) = self.read_stored_fan_setpoint(0x01) {
-            return rpm;
-        }
-        return self.fan_rpm as u16 * 100;
+    pub fn read_fan_rpm_from_ec(&mut self) -> Result<u16, TransportError> {
+        self.read_stored_fan_setpoint(0x01)
     }
 
     pub fn set_logo_led_state(&mut self, mode: u8) -> bool {
@@ -1185,14 +1231,14 @@ impl RazerLaptop {
             } else if mode == 2 {
                 report.args[2] = 0x02;
             }
-            self.send_report(report);
+            self.send_report_logging(report);
         }
 
         let mut report: RazerPacket = RazerPacket::new(0x03, 0x00, 0x03);
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::LOGO_LED;
         report.args[2] = self.clamp_u8(mode, 0x00, 0x01);
-        if let Some(_) = self.send_report(report) {
+        if let Some(_) = self.send_report_logging(report) {
             return true;
         }
 
@@ -1204,7 +1250,7 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x03, 0x82, 0x03);
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::LOGO_LED;
-        if let Some(response) = self.send_report(report){
+        if let Some(response) = self.send_report_logging(report){
             return response.args[2];
         }
         return 0;
@@ -1215,7 +1261,7 @@ impl RazerLaptop {
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::BACKLIGHT_LED;
         report.args[2] = brightness;
-        if let Some(_) = self.send_report(report) {
+        if let Some(_) = self.send_report_logging(report) {
             return true;
         }
 
@@ -1228,7 +1274,7 @@ impl RazerLaptop {
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::BACKLIGHT_LED;
         report.args[2] = 0x00;
-        if let Some(response) = self.send_report(report){
+        if let Some(response) = self.send_report_logging(report){
             return response.args[2];
         }
         return 0;
@@ -1243,7 +1289,7 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x07, 0x92, 0x01);
         report.args[0] = 0x00;
 
-        return self.send_report(report)
+        return self.send_report_logging(report)
             .map(|resp| resp.args[0]);
     }
 
@@ -1255,8 +1301,8 @@ impl RazerLaptop {
         let mut report = RazerPacket::new(0x07, 0x12, 0x01);
         report.args[0] = bho_to_byte(is_on, threshold);
 
-        return self.send_report(report)
-            .map_or(false, |r| { 
+        return self.send_report_logging(report)
+            .map_or(false, |r| {
                 println!("Response Packet:\n{:#?}", r); 
                 true
             } 
@@ -1273,16 +1319,36 @@ impl RazerLaptop {
         return id;
     }
 
-    fn send_report(&mut self, mut report: RazerPacket) -> Option<RazerPacket> {
+    /// Convert a transport failure into the legacy `Option` shape, logging the
+    /// full typed error. Only the non-thermal bool/effect setters use this;
+    /// thermal and power methods propagate `TransportError` instead.
+    fn send_report_logging(&mut self, report: RazerPacket) -> Option<RazerPacket> {
+        match self.send_report(report) {
+            Ok(response) => Some(response),
+            Err(error) => {
+                eprintln!("HID command failed: {error:?}");
+                None
+            }
+        }
+    }
+
+    fn send_report(&mut self, mut report: RazerPacket) -> Result<RazerPacket, TransportError> {
         let poll_interval = time::Duration::from_millis(Self::SEND_POLL_INTERVAL_MS);
+        let mut last_error: Option<TransportError> = None;
 
         for _ in 0..Self::SEND_WRITE_ATTEMPTS {
             // Rotate the transaction id per write so a resend is not mistaken for a
             // duplicate of the previous attempt.
             report.id = self.next_transaction_id();
-            let request = report.calc_crc();
-            if let Err(e) = self.device.send_feature_report(request.as_slice()) {
-                eprintln!("HID write failed: {}", e);
+            let request = report.serialize()?;
+            if let Err(e) = self.device.send_feature_report(&request) {
+                last_error = Some(TransportError::Write {
+                    pid: self.pid,
+                    transaction_id: report.id,
+                    command_class: report.command_class,
+                    command_id: report.command_id,
+                    detail: e.to_string(),
+                });
                 thread::sleep(poll_interval);
                 continue;
             }
@@ -1300,17 +1366,34 @@ impl RazerLaptop {
                 let size = match self.device.get_feature_report(&mut buf) {
                     Ok(size) => size,
                     Err(e) => {
-                        eprintln!("HID read failed: {}", e);
+                        last_error = Some(TransportError::Read {
+                            pid: self.pid,
+                            transaction_id: report.id,
+                            command_class: report.command_class,
+                            command_id: report.command_id,
+                            detail: e.to_string(),
+                        });
                         continue;
                     }
                 };
                 if size != 91 {
+                    last_error = Some(TransportError::Size {
+                        pid: self.pid,
+                        command_class: report.command_class,
+                        command_id: report.command_id,
+                        size,
+                    });
                     continue;
                 }
                 let response = match bincode::deserialize::<RazerPacket>(&buf) {
                     Ok(response) => response,
                     Err(e) => {
-                        eprintln!("Response decode failed: {}", e);
+                        last_error = Some(TransportError::Decode {
+                            pid: self.pid,
+                            command_class: report.command_class,
+                            command_id: report.command_id,
+                            detail: e.to_string(),
+                        });
                         continue;
                     }
                 };
@@ -1322,19 +1405,26 @@ impl RazerLaptop {
                         if settle > 0 {
                             thread::sleep(time::Duration::from_millis(settle));
                         }
-                        return Some(response);
+                        return Ok(response);
                     }
                     ResponseAction::KeepPolling => continue,
                     ResponseAction::Resend => {
+                        last_error = Some(TransportError::CommandFailure {
+                            pid: self.pid,
+                            transaction_id: report.id,
+                            command_class: report.command_class,
+                            command_id: report.command_id,
+                            status: response.status,
+                        });
                         resend = true;
                         break;
                     }
                     ResponseAction::Unsupported => {
-                        eprintln!(
-                            "Command not supported (class {:#04x} id {:#04x})",
-                            report.command_class, report.command_id
-                        );
-                        return None;
+                        return Err(TransportError::Unsupported {
+                            pid: self.pid,
+                            command_class: report.command_class,
+                            command_id: report.command_id,
+                        });
                     }
                 }
             }
@@ -1346,7 +1436,12 @@ impl RazerLaptop {
             }
         }
 
-        None
+        Err(last_error.unwrap_or(TransportError::ExhaustedPolls {
+            pid: self.pid,
+            command_class: report.command_class,
+            command_id: report.command_id,
+            attempts: Self::SEND_WRITE_ATTEMPTS,
+        }))
     }
 
 }
@@ -1371,11 +1466,16 @@ enum ResponseAction {
 fn classify_response(request: &RazerPacket, response: &RazerPacket) -> ResponseAction {
     // Battery-health-optimizer replies come back with command id 0x92 whether the
     // request was the get (0x92) or the set (0x12); accept those for BHO requests
-    // only, so a stale BHO reply is never taken as another command's response.
+    // only, and still require a matching transaction id and command class so a
+    // stale BHO reply is never taken as another command's response.
     if response.command_id == 0x92 && (request.command_id == 0x92 || request.command_id == 0x12) {
-        return ResponseAction::Accept;
+        if request.id == response.id && request.command_class == response.command_class {
+            return ResponseAction::Accept;
+        }
+        return ResponseAction::KeepPolling;
     }
-    if response.command_class != request.command_class
+    if request.id != response.id
+        || response.command_class != request.command_class
         || response.command_id != request.command_id
         || response.remaining_packets != request.remaining_packets
     {
@@ -1427,6 +1527,33 @@ mod tests {
         let mut packet = RazerPacket::new(command_class, command_id, 0x00);
         packet.status = status;
         packet
+    }
+
+    #[test]
+    fn serializes_synapse_fan_mode_request() {
+        let mut request: RazerPacket = RazerPacket::new(0x0d, 0x02, 0x04);
+        request.id = 7;
+        request.args[..4].copy_from_slice(&[1, 1, 0, 0]);
+        let encoded: [u8; 91] = request.serialize().unwrap();
+        let mut expected: [u8; 91] = [0; 91];
+        expected[2] = 7;
+        expected[6] = 4;
+        expected[7] = 0x0d;
+        expected[8] = 0x02;
+        expected[9..13].copy_from_slice(&[1, 1, 0, 0]);
+        expected[89] = 0x0b;
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn keeps_polling_on_wrong_transaction_id() {
+        let request = RazerPacket::new(0x0d, 0x02, 0x04);
+        let mut response = reply(0x0d, 0x02, RazerPacket::RAZER_CMD_SUCCESSFUL);
+        response.id = request.id.wrapping_add(1);
+        assert_eq!(
+            classify_response(&request, &response),
+            ResponseAction::KeepPolling
+        );
     }
 
     #[test]

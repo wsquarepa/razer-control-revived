@@ -194,6 +194,179 @@ pub fn validate_custom_level(level: u8) -> Result<u8, ThermalPolicyError> {
     }
 }
 
+/// A single class-0x0d thermal command payload, independent of HID transport.
+/// The command class is always 0x0d; only the id, the declared request data
+/// size, and the 80 argument bytes vary. This is data, not behavior: the
+/// builders below fill it and the device layer frames it into a HID report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThermalCommand {
+    pub command_id: u8,
+    pub data_size: u8,
+    pub args: [u8; 80],
+}
+
+/// EC-reported fan RPM limits for one performance mode, already scaled to RPM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FanLimits {
+    pub min: u16,
+    pub default: u16,
+    pub max: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalDecodeError {
+    UnexpectedFanCount { expected: u8, actual: u8 },
+    UnknownFanId { id: u8, index: usize },
+    DuplicateFanId { id: u8 },
+    MissingFanId { fan: FanId },
+    UnexpectedProfile { expected: u8, actual: u8 },
+    UnexpectedFan { expected: u8, actual: u8 },
+    ZeroLimit { min: u16, default: u16, max: u16 },
+    InvertedLimits { min: u16, default: u16, max: u16 },
+}
+
+/// Profile slot every per-fan thermal command targets. Pinning this to 1 keeps
+/// reads and writes on the same EC slot; earlier builds wrote boost commands to
+/// profile 0, an inactive slot.
+const THERMAL_PROFILE: u8 = 1;
+
+/// Build the 0x80 Get Thermal Fan ID List request. Request data size 80 mirrors
+/// Synapse's variable-length list read (request tuple `[80, 13, 128]`).
+pub fn get_fan_ids() -> ThermalCommand {
+    ThermalCommand { command_id: 0x80, data_size: 80, args: [0u8; 80] }
+}
+
+/// Build the 0x01 Set Thermal Fan Speed request: `[profile=1, fan_id, rpm/100]`.
+pub fn set_fan_speed(fan: FanId, rpm: FanRpm) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    args[2] = (rpm.0 / 100) as u8;
+    ThermalCommand { command_id: 0x01, data_size: 3, args }
+}
+
+/// Build the 0x02 Set Thermal Fan Mode request:
+/// `[profile=1, fan_id, performance_mode, manual_flag]`.
+pub fn set_fan_mode(fan: FanId, mode: PerformanceMode, manual: bool) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    args[2] = mode.wire_value();
+    args[3] = u8::from(manual);
+    ThermalCommand { command_id: 0x02, data_size: 4, args }
+}
+
+/// Build the 0x07 Set Custom CPU/GPU Level request: `[profile=1, fan_id, level]`.
+pub fn set_boost(fan: FanId, level: u8) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    args[2] = level;
+    ThermalCommand { command_id: 0x07, data_size: 3, args }
+}
+
+/// Build the 0x81 Get Thermal Fan Speed request: `[profile=1, fan_id]`.
+pub fn get_fan_speed(fan: FanId) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    ThermalCommand { command_id: 0x81, data_size: 3, args }
+}
+
+/// Build the 0x82 Get Thermal Fan Mode request: `[profile=1, fan_id]`.
+pub fn get_fan_mode(fan: FanId) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    ThermalCommand { command_id: 0x82, data_size: 4, args }
+}
+
+/// Build the 0x86 Get Thermal Fan Information request. Limits are per
+/// performance mode, not per fan zone, so the payload is a single argument-0
+/// byte (Synapse request tuple `[7, 13, 134]`).
+pub fn get_fan_limits() -> ThermalCommand {
+    ThermalCommand { command_id: 0x86, data_size: 7, args: [0u8; 80] }
+}
+
+/// Build the 0x87 Get Custom CPU/GPU Level request: `[profile=1, fan_id]`.
+pub fn get_boost(fan: FanId) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    ThermalCommand { command_id: 0x87, data_size: 3, args }
+}
+
+/// Build the 0x88 Get Thermal Fan Current Speed request: `[profile=1, fan_id]`.
+pub fn get_current_fan_rpm(fan: FanId) -> ThermalCommand {
+    let mut args: [u8; 80] = [0; 80];
+    args[0] = THERMAL_PROFILE;
+    args[1] = fan.wire_value();
+    ThermalCommand { command_id: 0x88, data_size: 3, args }
+}
+
+/// Decode the 0x80 fan-ID list reply. The payload is count-prefixed: `args[0]`
+/// is the count, `args[1..1 + count]` are the IDs, and any following bytes are
+/// padding. The Blade 16 2025 preflight requires exactly the set `{CPU, GPU}`;
+/// order is normalized to `[Cpu, Gpu]` on success.
+pub fn decode_fan_ids(args: &[u8; 80]) -> Result<[FanId; 2], ThermalDecodeError> {
+    const EXPECTED_COUNT: u8 = 2;
+    let count: u8 = args[0];
+    if count != EXPECTED_COUNT {
+        return Err(ThermalDecodeError::UnexpectedFanCount { expected: EXPECTED_COUNT, actual: count });
+    }
+    // count == 2 is verified before any indexing, so args[1] and args[2] are in bounds.
+    let first: FanId = decode_fan_id_byte(args[1], 1)?;
+    let second: FanId = decode_fan_id_byte(args[2], 2)?;
+    if first == second {
+        return Err(ThermalDecodeError::DuplicateFanId { id: args[1] });
+    }
+    if first != FanId::Cpu && second != FanId::Cpu {
+        return Err(ThermalDecodeError::MissingFanId { fan: FanId::Cpu });
+    }
+    if first != FanId::Gpu && second != FanId::Gpu {
+        return Err(ThermalDecodeError::MissingFanId { fan: FanId::Gpu });
+    }
+    Ok([FanId::Cpu, FanId::Gpu])
+}
+
+fn decode_fan_id_byte(raw: u8, index: usize) -> Result<FanId, ThermalDecodeError> {
+    match raw {
+        1 => Ok(FanId::Cpu),
+        2 => Ok(FanId::Gpu),
+        _ => Err(ThermalDecodeError::UnknownFanId { id: raw, index }),
+    }
+}
+
+/// Decode a 0x88 Get Thermal Fan Current Speed reply: `[profile=1, fan_id,
+/// rpm/100]`. Rejects a reply whose profile or fan byte does not match the
+/// request so a stale reply is never read as the requested zone.
+pub fn decode_fan_rpm(fan: FanId, args: &[u8; 80]) -> Result<u16, ThermalDecodeError> {
+    if args[0] != THERMAL_PROFILE {
+        return Err(ThermalDecodeError::UnexpectedProfile { expected: THERMAL_PROFILE, actual: args[0] });
+    }
+    let expected_fan: u8 = fan.wire_value();
+    if args[1] != expected_fan {
+        return Err(ThermalDecodeError::UnexpectedFan { expected: expected_fan, actual: args[1] });
+    }
+    Ok(u16::from(args[2]) * 100)
+}
+
+/// Decode a 0x86 Get Thermal Fan Information reply. Minimum, default, and
+/// maximum RPM sit at fields B/D/F (args indices 6/8/10), each in units of 100
+/// RPM. Rejects a zero limit or a non-ascending min/default/max ordering.
+pub fn decode_fan_limits(args: &[u8; 80]) -> Result<FanLimits, ThermalDecodeError> {
+    let min: u16 = u16::from(args[6]) * 100;
+    let default: u16 = u16::from(args[8]) * 100;
+    let max: u16 = u16::from(args[10]) * 100;
+    if min == 0 || default == 0 || max == 0 {
+        return Err(ThermalDecodeError::ZeroLimit { min, default, max });
+    }
+    if min > default || default > max {
+        return Err(ThermalDecodeError::InvertedLimits { min, default, max });
+    }
+    Ok(FanLimits { min, default, max })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +520,196 @@ mod tests {
         assert_eq!(manual_tolerance(4000), 1000);
         assert_eq!(manual_tolerance(5400), 1350);
         assert_eq!(manual_tolerance(1000), 500);
+    }
+
+    #[test]
+    fn builds_get_fan_ids_request() {
+        let command: ThermalCommand = get_fan_ids();
+        assert_eq!(command.command_id, 0x80);
+        assert_eq!(command.data_size, 80);
+        assert_eq!(command.args, [0u8; 80]);
+    }
+
+    #[test]
+    fn builds_set_fan_speed_request() {
+        let command: ThermalCommand = set_fan_speed(FanId::Cpu, FanRpm(3400));
+        assert_eq!(command.command_id, 0x01);
+        assert_eq!(command.data_size, 3);
+        assert_eq!(&command.args[..3], &[1, 1, 34]);
+    }
+
+    #[test]
+    fn builds_set_fan_mode_request() {
+        let command: ThermalCommand =
+            set_fan_mode(FanId::Gpu, PerformanceMode::MaximumPerformance, true);
+        assert_eq!(command.command_id, 0x02);
+        assert_eq!(command.data_size, 4);
+        assert_eq!(&command.args[..4], &[1, 2, 2, 1]);
+    }
+
+    #[test]
+    fn builds_set_boost_request_with_profile_one() {
+        // Regression guard: earlier builds shipped boost with profile byte 0.
+        let command: ThermalCommand = set_boost(FanId::Cpu, 2);
+        assert_eq!(command.command_id, 0x07);
+        assert_eq!(command.data_size, 3);
+        assert_eq!(&command.args[..3], &[1, 1, 2]);
+    }
+
+    #[test]
+    fn builds_get_fan_speed_request() {
+        let command: ThermalCommand = get_fan_speed(FanId::Cpu);
+        assert_eq!(command.command_id, 0x81);
+        assert_eq!(command.data_size, 3);
+        assert_eq!(&command.args[..2], &[1, 1]);
+    }
+
+    #[test]
+    fn builds_get_fan_mode_request() {
+        let command: ThermalCommand = get_fan_mode(FanId::Gpu);
+        assert_eq!(command.command_id, 0x82);
+        assert_eq!(command.data_size, 4);
+        assert_eq!(&command.args[..2], &[1, 2]);
+    }
+
+    #[test]
+    fn builds_get_fan_limits_request_mode_global() {
+        // 0x86 is mode-global: a single argument-0 payload, never profile-pinned or per fan.
+        let command: ThermalCommand = get_fan_limits();
+        assert_eq!(command.command_id, 0x86);
+        assert_eq!(command.data_size, 7);
+        assert_eq!(command.args, [0u8; 80]);
+    }
+
+    #[test]
+    fn builds_get_boost_request_with_profile_one() {
+        let command: ThermalCommand = get_boost(FanId::Gpu);
+        assert_eq!(command.command_id, 0x87);
+        assert_eq!(command.data_size, 3);
+        assert_eq!(&command.args[..2], &[1, 2]);
+    }
+
+    #[test]
+    fn builds_get_current_fan_rpm_request() {
+        let command: ThermalCommand = get_current_fan_rpm(FanId::Cpu);
+        assert_eq!(command.command_id, 0x88);
+        assert_eq!(command.data_size, 3);
+        assert_eq!(&command.args[..2], &[1, 1]);
+    }
+
+    #[test]
+    fn decodes_current_fan_rpm() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[1, 2, 34]);
+        assert_eq!(decode_fan_rpm(FanId::Gpu, &args), Ok(3400));
+    }
+
+    #[test]
+    fn rejects_fan_rpm_with_wrong_profile() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[0, 1, 34]);
+        assert_eq!(
+            decode_fan_rpm(FanId::Cpu, &args),
+            Err(ThermalDecodeError::UnexpectedProfile { expected: 1, actual: 0 })
+        );
+    }
+
+    #[test]
+    fn rejects_fan_rpm_with_wrong_fan() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[1, 2, 34]);
+        assert_eq!(
+            decode_fan_rpm(FanId::Cpu, &args),
+            Err(ThermalDecodeError::UnexpectedFan { expected: 1, actual: 2 })
+        );
+    }
+
+    #[test]
+    fn decodes_fan_limits() {
+        let mut args: [u8; 80] = [0; 80];
+        args[6] = 34;
+        args[8] = 40;
+        args[10] = 54;
+        assert_eq!(
+            decode_fan_limits(&args),
+            Ok(FanLimits { min: 3400, default: 4000, max: 5400 })
+        );
+    }
+
+    #[test]
+    fn rejects_zero_fan_limits() {
+        let mut args: [u8; 80] = [0; 80];
+        args[6] = 34;
+        args[8] = 0;
+        args[10] = 54;
+        assert_eq!(
+            decode_fan_limits(&args),
+            Err(ThermalDecodeError::ZeroLimit { min: 3400, default: 0, max: 5400 })
+        );
+    }
+
+    #[test]
+    fn rejects_inverted_fan_limits() {
+        let mut args: [u8; 80] = [0; 80];
+        args[6] = 54;
+        args[8] = 40;
+        args[10] = 34;
+        assert_eq!(
+            decode_fan_limits(&args),
+            Err(ThermalDecodeError::InvertedLimits { min: 5400, default: 4000, max: 3400 })
+        );
+    }
+
+    #[test]
+    fn decodes_count_prefixed_fan_ids() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[2, 1, 2]);
+        assert_eq!(decode_fan_ids(&args), Ok([FanId::Cpu, FanId::Gpu]));
+    }
+
+    #[test]
+    fn normalizes_reversed_fan_id_order() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[2, 2, 1]);
+        assert_eq!(decode_fan_ids(&args), Ok([FanId::Cpu, FanId::Gpu]));
+    }
+
+    #[test]
+    fn ignores_padding_after_counted_ids() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..5].copy_from_slice(&[2, 1, 2, 9, 9]);
+        assert_eq!(decode_fan_ids(&args), Ok([FanId::Cpu, FanId::Gpu]));
+    }
+
+    #[test]
+    fn rejects_wrong_fan_count() {
+        for count in [0_u8, 1, 3, 80] {
+            let mut args: [u8; 80] = [0; 80];
+            args[0] = count;
+            assert!(matches!(
+                decode_fan_ids(&args),
+                Err(ThermalDecodeError::UnexpectedFanCount { expected: 2, actual }) if actual == count
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_fan_ids() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[2, 1, 1]);
+        assert_eq!(
+            decode_fan_ids(&args),
+            Err(ThermalDecodeError::DuplicateFanId { id: 1 })
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_fan_id() {
+        let mut args: [u8; 80] = [0; 80];
+        args[..3].copy_from_slice(&[2, 1, 3]);
+        assert_eq!(
+            decode_fan_ids(&args),
+            Err(ThermalDecodeError::UnknownFanId { id: 3, index: 2 })
+        );
     }
 }
