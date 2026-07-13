@@ -16,6 +16,7 @@ mod comms;
 mod config;
 mod kbd;
 mod device;
+mod thermal;
 mod gpu;
 mod battery;
 mod dbus_mutter_displayconfig;
