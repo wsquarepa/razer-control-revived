@@ -1,0 +1,56 @@
+{
+  "power": [
+    {
+      "power_mode": 3,
+      "cpu_boost": 3,
+      "gpu_boost": 1,
+      "fan_rpm": 2400,
+      "brightness": 128,
+      "logo_state": 0,
+      "screensaver": false,
+      "idle": 0,
+      "fan_curve": {
+        "enabled": true,
+        "source": "Cpu",
+        "cpu_points": [
+          { "temp_c": 40, "rpm": 2200 },
+          { "temp_c": 90, "rpm": 5000 }
+        ],
+        "gpu_points": [
+          { "temp_c": 40, "rpm": 2200 },
+          { "temp_c": 90, "rpm": 5000 }
+        ]
+      }
+    },
+    {
+      "power_mode": 4,
+      "cpu_boost": 2,
+      "gpu_boost": 3,
+      "fan_rpm": 2200,
+      "brightness": 128,
+      "logo_state": 1,
+      "screensaver": false,
+      "idle": 0,
+      "fan_curve": {
+        "enabled": false,
+        "source": "Both",
+        "cpu_points": [
+          { "temp_c": 40, "rpm": 2200 },
+          { "temp_c": 90, "rpm": 5000 }
+        ],
+        "gpu_points": [
+          { "temp_c": 40, "rpm": 2200 },
+          { "temp_c": 90, "rpm": 5000 }
+        ]
+      }
+    }
+  ],
+  "sync": false,
+  "no_light": 0.0,
+  "standard_effect": 4,
+  "standard_effect_params": [],
+  "bho_on": false,
+  "bho_threshold": 80,
+  "gui_effect": 0,
+  "gui_effect_params": []
+}

@@ -87,6 +87,12 @@ fn main() {
             println!("no supported device found");
             std::process::exit(1);
         }
+        // Migrate the saved configuration for the discovered PID before any
+        // hardware state is applied from it.
+        if let Err(error) = d.migrate_configuration() {
+            eprintln!("configuration migration failed: {error}");
+            std::process::exit(1);
+        }
     } else {
         println!("error loading supported devices");
         std::process::exit(1);

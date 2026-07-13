@@ -213,12 +213,42 @@ impl DeviceManager {
         let mut res: DeviceManager = DeviceManager::new();
         res.supported_devices = serde_json::from_slice(str.as_slice())?;
         println!("suported devices found: {:?}", res.supported_devices.len());
-        match config::Configuration::read_from_config() {
+        match config::Configuration::load() {
             Ok(c) => res.config = Some(c),
-            Err(_) => res.config = Some(config::Configuration::new()),
+            Err(error) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("failed to load configuration: {error}"),
+                ));
+            }
         }
 
         Ok(res)
+    }
+
+    /// Run the one-time schema migration for the discovered device's PID.
+    /// Persists the configuration only when the migration actually changed it.
+    pub fn migrate_configuration(&mut self) -> Result<(), config::ConfigurationError> {
+        let pid: u16 = match self.device.as_ref() {
+            Some(laptop) => laptop.pid(),
+            None => return Ok(()),
+        };
+        let configuration: config::Configuration = match self.config.take() {
+            Some(configuration) => configuration,
+            None => return Ok(()),
+        };
+        let outcome: config::MigrationOutcome = config::migrate_for_pid(configuration, pid)?;
+        for warning in &outcome.warnings {
+            match serde_json::to_string(warning) {
+                Ok(serialized) => println!("configuration migration warning: {serialized}"),
+                Err(error) => eprintln!("failed to serialize migration warning: {error}"),
+            }
+        }
+        if outcome.migrated {
+            outcome.configuration.write_to_file()?;
+        }
+        self.config = Some(outcome.configuration);
+        Ok(())
     }
 
     fn get_ac_config(&mut self, ac: usize) -> Option<config::PowerConfig> {
@@ -699,6 +729,7 @@ impl DeviceManager {
                                     supported_device.name.clone(),
                                     supported_device.features.clone(),
                                     supported_device.fan.clone(),
+                                    device.product_id(),
                                     dev,
                                 ));
                                 return;
@@ -765,6 +796,7 @@ impl DeviceManager {
                                     supported_device.name.clone(),
                                     supported_device.features.clone(),
                                     supported_device.fan.clone(),
+                                    pid,
                                     dev,
                                 ));
                                 return;
@@ -796,6 +828,7 @@ pub struct RazerLaptop {
     name: String,
     pub(crate) features: Vec<String>,
     fan: Vec<u16>,
+    pid: u16,
     device: hidapi::HidDevice,
     power: u8, // need for fan
     fan_rpm: u8, // need for power
@@ -833,11 +866,12 @@ impl RazerLaptop {
     const SEND_READ_POLLS: usize = 20;
     const SEND_POLL_INTERVAL_MS: u64 = 5;
 
-    pub fn new(name: String, features: Vec<String>, fan: Vec<u16>, device: hidapi::HidDevice) -> RazerLaptop {
+    pub fn new(name: String, features: Vec<String>, fan: Vec<u16>, pid: u16, device: hidapi::HidDevice) -> RazerLaptop {
         return RazerLaptop{
             name,
             features,
             fan,
+            pid,
             device,
             power: 0,
             fan_rpm: 0,
@@ -845,6 +879,10 @@ impl RazerLaptop {
             screensaver: false,
             transaction_id: 0,
         };
+    }
+
+    pub fn pid(&self) -> u16 {
+        return self.pid;
     }
 
     pub fn set_screensaver(&mut self, active: bool) {
