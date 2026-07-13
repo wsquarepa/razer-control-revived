@@ -197,7 +197,13 @@ fn run_service() {
                 thermal::ThermalSafetyState::Disabled => d.set_ac_index(online),
             }
             d.restore_standard_effect();
-            d.restore_bho();
+            // Disabled means no saved thermal/power state may reach the EC; BHO restore is a power write.
+            match safety {
+                thermal::ThermalSafetyState::Ready => d.restore_bho(),
+                thermal::ThermalSafetyState::Disabled => {
+                    eprintln!("thermal preflight failed: skipping BHO restore")
+                }
+            }
             // Only load per-key RGB effects if device supports custom frames.
             // Sending custom frame HID reports to unsupported devices can
             // overwhelm the USB/HID subsystem and trigger kernel panics.
