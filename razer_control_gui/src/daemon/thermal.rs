@@ -602,6 +602,92 @@ pub struct FailbackReport {
     pub gpu: ZoneOutcome,
 }
 
+/// Seconds after the wake signal at which the single getter-only re-verification
+/// runs. The firmware may finish resetting the GPU power zone several seconds
+/// into resume, and UPower can be slow to settle the AC state, so the readback
+/// waits for both before deciding whether one repair is warranted.
+pub const WAKE_DELAYED_VERIFY_SECS: u64 = 10;
+
+/// One step of the burst-free post-wake re-latch sequence (Blade 16 2025).
+/// `delay_secs` is measured from the wake signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WakeStep {
+    pub delay_secs: u64,
+    pub kind: WakeStepKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeStepKind {
+    /// The full verified apply (write + readback), run once immediately on wake.
+    ApplyAndVerify,
+    /// A getter-only re-verification (no writes) that authorizes at most one
+    /// repair; see `decide_wake_repair`.
+    DelayedReadback,
+}
+
+/// The post-wake re-latch sequence: exactly one immediate verified apply, then
+/// one getter-only readback `WAKE_DELAYED_VERIFY_SECS` later. Deliberately
+/// burst-free: the delayed readback, not repetition, decides whether the single
+/// repair runs.
+pub fn wake_sequence() -> [WakeStep; 2] {
+    [
+        WakeStep { delay_secs: 0, kind: WakeStepKind::ApplyAndVerify },
+        WakeStep { delay_secs: WAKE_DELAYED_VERIFY_SECS, kind: WakeStepKind::DelayedReadback },
+    ]
+}
+
+/// The outcome of the delayed getter-only readback: whether the applied thermal
+/// state still holds, or the firmware reset it during resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeVerifyOutcome {
+    StateHeld,
+    StateReset,
+}
+
+/// The corrective step after the delayed readback. At most one repair is ever
+/// issued, so there is no multi-repair variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeRepair {
+    None,
+    ReapplyOnce,
+}
+
+/// The delayed readback authorizes at most one repair, and only when it found the
+/// applied state reset. A held state needs no write.
+pub fn decide_wake_repair(outcome: WakeVerifyOutcome) -> WakeRepair {
+    match outcome {
+        WakeVerifyOutcome::StateHeld => WakeRepair::None,
+        WakeVerifyOutcome::StateReset => WakeRepair::ReapplyOnce,
+    }
+}
+
+/// Fold the single post-wake repair's result into the shared failure counter, so
+/// a failed repair advances the same state machine a failed monitoring cycle
+/// would (the second consecutive failure trips failback) rather than a bespoke
+/// path. A successful repair clears the counter like a passing cycle.
+pub fn advance_after_repair(
+    state: ThermalSafetyState,
+    repair: Result<(), ThermalFailure>,
+) -> SafetyTransition {
+    let event: VerificationEvent = match repair {
+        Ok(()) => VerificationEvent::Succeeded,
+        Err(failure) => VerificationEvent::Failed(failure),
+    };
+    advance_safety(state, event)
+}
+
+/// The dGPU inactive-to-active relatch commands for the Blade 16 2025. In Custom
+/// mode the daemon re-latches only the GPU custom level: write it (0x07) then read
+/// it back (0x87), touching no CPU state and no fan state. Outside Custom there is
+/// nothing mode-specific to re-latch, so the plan is empty. The level is passed
+/// through unchanged; the caller validates it before any write.
+pub fn dgpu_resume_plan(mode: PerformanceMode, gpu_level: u8) -> Vec<ThermalCommand> {
+    if mode != PerformanceMode::Custom {
+        return Vec::new();
+    }
+    vec![set_boost(FanId::Gpu, gpu_level), get_boost(FanId::Gpu)]
+}
+
 /// How the daemon binary was invoked. The three modes are mutually exclusive and
 /// matched once at startup, so no per-mode behavior flag is threaded downstream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1217,5 +1303,79 @@ mod tests {
         }
         assert_eq!(FanId::from_wire(0), None);
         assert_eq!(FanId::from_wire(3), None);
+    }
+
+    #[test]
+    fn wake_sequence_is_one_immediate_apply_then_one_delayed_readback() {
+        let sequence: [WakeStep; 2] = wake_sequence();
+        let immediate: Vec<&WakeStep> = sequence
+            .iter()
+            .filter(|step| step.kind == WakeStepKind::ApplyAndVerify)
+            .collect();
+        assert_eq!(immediate.len(), 1, "exactly one immediate verified apply");
+        assert_eq!(immediate[0].delay_secs, 0, "the immediate apply has no delay");
+        let delayed: Vec<&WakeStep> = sequence
+            .iter()
+            .filter(|step| step.kind == WakeStepKind::DelayedReadback)
+            .collect();
+        assert_eq!(delayed.len(), 1, "exactly one delayed getter-only readback");
+        assert_eq!(delayed[0].delay_secs, 10, "the delayed readback runs at ten seconds");
+        assert_eq!(delayed[0].delay_secs, WAKE_DELAYED_VERIFY_SECS);
+    }
+
+    #[test]
+    fn wake_repair_runs_at_most_once_and_only_on_reset() {
+        assert_eq!(decide_wake_repair(WakeVerifyOutcome::StateHeld), WakeRepair::None);
+        assert_eq!(decide_wake_repair(WakeVerifyOutcome::StateReset), WakeRepair::ReapplyOnce);
+    }
+
+    #[test]
+    fn failed_wake_repair_feeds_the_normal_failure_counter() {
+        let armed: ThermalSafetyState =
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 };
+        let first: SafetyTransition =
+            advance_after_repair(armed, Err(ThermalFailure::Transport));
+        assert_eq!(
+            first.state,
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 1 }
+        );
+        assert_eq!(first.action, None);
+        // A second consecutive failed repair trips the same failback the monitor uses.
+        let second: SafetyTransition =
+            advance_after_repair(first.state, Err(ThermalFailure::Transport));
+        assert_eq!(second.state, ThermalSafetyState::Disabled);
+        assert_eq!(second.action, Some(SafetyAction::FailbackBothFans));
+        // A successful repair clears the counter, just like a passing monitor cycle.
+        let cleared: SafetyTransition = advance_after_repair(first.state, Ok(()));
+        assert_eq!(
+            cleared.state,
+            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 }
+        );
+        assert_eq!(cleared.action, None);
+    }
+
+    #[test]
+    fn dgpu_resume_relatches_gpu_boost_only_in_custom() {
+        let plan: Vec<ThermalCommand> = dgpu_resume_plan(PerformanceMode::Custom, 2);
+        assert_eq!(plan.len(), 2, "Custom relatch is exactly write then readback");
+        assert_eq!(plan[0].command_id, 0x07);
+        assert_eq!(plan[1].command_id, 0x87);
+        // Every command targets the GPU zone: no CPU state, no fan state is touched.
+        assert!(plan.iter().all(|command| command.args[1] == FanId::Gpu.wire_value()));
+        assert!(plan.iter().all(|command| command.args[1] != FanId::Cpu.wire_value()));
+        assert_eq!(plan[0].args[2], 2, "the write carries the requested GPU level");
+    }
+
+    #[test]
+    fn dgpu_resume_issues_no_command_outside_custom() {
+        for mode in [
+            PerformanceMode::Balanced,
+            PerformanceMode::Silent,
+            PerformanceMode::MaximumPerformance,
+            PerformanceMode::BatterySaver,
+            PerformanceMode::Hyperboost,
+        ] {
+            assert!(dgpu_resume_plan(mode, 2).is_empty(), "no dGPU command outside Custom");
+        }
     }
 }

@@ -204,6 +204,16 @@ impl From<thermal::ThermalPolicyError> for ThermalError {
     }
 }
 
+/// Map a verified-apply failure to the pure failure class the safety state
+/// machine consumes. A decode failure means a reply could not be validated for
+/// its own zone (a readback mismatch); anything else is a transport failure.
+fn thermal_failure_class(error: &ThermalError) -> thermal::ThermalFailure {
+    match error {
+        ThermalError::Decode(_) => thermal::ThermalFailure::ReadbackMismatch,
+        _ => thermal::ThermalFailure::Transport,
+    }
+}
+
 /// Classify a per-zone failback attempt into the pure outcome the report retains.
 fn zone_outcome(result: Result<(), ThermalError>) -> thermal::ZoneOutcome {
     match result {
@@ -514,6 +524,163 @@ impl DeviceManager {
                 "[verify {}] ac={} cfg(mode={} cpu={} gpu={}) hw(mode_z1={:?} mode_z2={:?} cpu={:?} gpu={:?})",
                 context, ac, cfg_mode, cfg_cpu, cfg_gpu, hw_mode_z1, hw_mode_z2, hw_cpu, hw_gpu
             );
+        }
+    }
+
+    /// Read the current AC line-power state from UPower. Used by the delayed
+    /// post-wake re-verification, where UPower may still have been mid-update at
+    /// the wake instant, so the settled reading decides the expected profile.
+    fn read_upower_online(&self) -> Option<bool> {
+        let dbus_system = Connection::new_system().ok()?;
+        let proxy_ac = dbus_system.with_proxy(
+            "org.freedesktop.UPower",
+            "/org/freedesktop/UPower/devices/line_power_AC0",
+            time::Duration::from_millis(5000),
+        );
+        use battery::OrgFreedesktopUPowerDevice;
+        proxy_ac.online().ok()
+    }
+
+    /// Re-apply the saved thermal profile (power mode, boosts, and fan) for the
+    /// current AC state through the verified setters. The single post-wake repair.
+    fn apply_current_profile_verified(&mut self) -> Result<(), ThermalError> {
+        let ac: usize = match self.get_device() {
+            Some(laptop) => laptop.get_ac_state(),
+            None => return Ok(()),
+        };
+        let config: config::PowerConfig = match self.get_ac_config(ac) {
+            Some(config) => config,
+            None => return Ok(()),
+        };
+        match self.get_device() {
+            Some(laptop) => {
+                laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost)?;
+                laptop.set_fan_rpm(config.fan_rpm as u16)?;
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The delayed post-wake re-verification (Blade 16 2025): re-read the settled
+    /// AC state, read back the applied thermal state with getters only, and issue
+    /// at most one verified repair, and only if the readback showed the firmware
+    /// reset it. A failed repair feeds the same failure counter the monitor uses.
+    pub fn wake_delayed_reverify(&mut self) {
+        if !self.is_blade_16_2025() {
+            return;
+        }
+        let online: bool = match self.read_upower_online() {
+            Some(online) => online,
+            None => {
+                eprintln!("post-wake reverify: UPower online read failed; skipping");
+                return;
+            }
+        };
+        if let Some(laptop) = self.get_device() {
+            laptop.set_ac_state(online);
+        }
+        let config: config::PowerConfig = match self.get_ac_config(online as usize) {
+            Some(config) => config,
+            None => return,
+        };
+        let expected_fan_hundreds: u8 = (config.fan_rpm / 100) as u8;
+        let outcome: thermal::WakeVerifyOutcome = match self.get_device() {
+            Some(laptop) => match laptop.wake_readback(
+                config.power_mode,
+                config.cpu_boost,
+                config.gpu_boost,
+                expected_fan_hundreds,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    eprintln!("post-wake reverify: readback failed: {error:?}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        match thermal::decide_wake_repair(outcome) {
+            thermal::WakeRepair::None => {
+                println!("post-wake state held; no repair needed");
+            }
+            thermal::WakeRepair::ReapplyOnce => {
+                println!("post-wake state was reset; issuing one repair");
+                let state_before: thermal::ThermalSafetyState = self
+                    .get_device()
+                    .map_or(thermal::ThermalSafetyState::Ready, |laptop| laptop.thermal_safety());
+                let repair: Result<(), thermal::ThermalFailure> = self
+                    .apply_current_profile_verified()
+                    .map_err(|error| {
+                        eprintln!("post-wake repair failed: {error:?}");
+                        thermal_failure_class(&error)
+                    });
+                let transition: thermal::SafetyTransition =
+                    thermal::advance_after_repair(state_before, repair);
+                if let Some(laptop) = self.get_device() {
+                    laptop.set_thermal_safety(transition.state);
+                }
+                if transition.action == Some(thermal::SafetyAction::FailbackBothFans) {
+                    if let Some(laptop) = self.get_device() {
+                        let report: thermal::FailbackReport = laptop.failback_both_fans();
+                        eprintln!("post-wake repair failback to firmware-automatic: {report:?}");
+                    }
+                }
+                self.log_hw_power_state("post-wake-repair");
+            }
+        }
+    }
+
+    /// Re-latch GPU boost on a dGPU inactive-to-active transition. The Blade 16
+    /// 2025 re-latches only the GPU custom level in Custom mode (touching no CPU or
+    /// fan state); other models keep their existing full-profile re-apply.
+    pub fn relatch_dgpu_boost(&mut self) {
+        if !self.is_blade_16_2025() {
+            self.reapply_power_mode();
+            self.log_hw_power_state("dgpu-resume");
+            return;
+        }
+        let ac: usize = match self.get_device() {
+            Some(laptop) => laptop.get_ac_state(),
+            None => return,
+        };
+        let config: config::PowerConfig = match self.get_ac_config(ac) {
+            Some(config) => config,
+            None => return,
+        };
+        let mode: thermal::PerformanceMode =
+            match thermal::PerformanceMode::try_from(config.power_mode) {
+                Ok(mode) => mode,
+                Err(error) => {
+                    eprintln!("dgpu relatch: unknown saved mode byte: {error}");
+                    return;
+                }
+            };
+        match self.get_device() {
+            Some(laptop) => match laptop.relatch_gpu_custom_boost(mode, config.gpu_boost) {
+                Ok(true) => println!("dGPU resumed: re-latched GPU custom boost"),
+                Ok(false) => {}
+                Err(error) => eprintln!("dgpu relatch failed: {error:?}"),
+            },
+            None => return,
+        }
+        self.log_hw_power_state("dgpu-resume");
+    }
+
+    /// On clean exit, if a fixed fan speed is armed (Manual), return both fan zones
+    /// to firmware-automatic control, attempting the GPU zone even if the CPU zone
+    /// errors and retaining both outcomes. Non-Manual postures need no restore.
+    pub fn restore_automatic_on_exit(&mut self) {
+        let armed: bool = matches!(
+            self.get_device().map(|laptop| laptop.thermal_safety()),
+            Some(thermal::ThermalSafetyState::Manual { .. })
+        );
+        if !armed {
+            return;
+        }
+        if let Some(laptop) = self.get_device() {
+            let report: thermal::FailbackReport = laptop.failback_both_fans();
+            println!("clean exit: restored fans to firmware-automatic control: {report:?}");
         }
     }
 
@@ -1192,6 +1359,12 @@ impl RazerLaptop {
         self.thermal_safety = state;
     }
 
+    /// The live thermal-safety posture, so the resume path can fold a failed
+    /// repair into the same failure counter the monitor uses.
+    pub fn thermal_safety(&self) -> thermal::ThermalSafetyState {
+        self.thermal_safety
+    }
+
     fn current_power_source(&self) -> thermal::PowerSource {
         // ac_state is 1 only when UPower reports line power online.
         if self.ac_state == 1 {
@@ -1633,13 +1806,7 @@ impl RazerLaptop {
                     failed => return failed,
                 },
                 Err(error) => {
-                    // A decode failure means the reply could not be validated for
-                    // its own zone (a stale or cross-zone reply): a readback
-                    // mismatch. Anything else is a transport failure.
-                    let failure: thermal::ThermalFailure = match error {
-                        ThermalError::Decode(_) => thermal::ThermalFailure::ReadbackMismatch,
-                        _ => thermal::ThermalFailure::Transport,
-                    };
+                    let failure: thermal::ThermalFailure = thermal_failure_class(&error);
                     eprintln!("thermal telemetry read failed for {fan:?}: {error:?}");
                     return thermal::VerificationEvent::Failed(failure);
                 }
@@ -1664,6 +1831,81 @@ impl RazerLaptop {
         let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(self.power)?;
         self.send_thermal(&thermal::set_fan_mode(fan, mode, false))?;
         Ok(())
+    }
+
+    /// Getter-only post-wake re-verification (Blade 16 2025): read the current fan
+    /// mode for both zones (0x82), the custom levels in Custom (0x87), and the fan
+    /// setpoint when a fixed speed is expected (0x81), comparing each against what
+    /// the daemon applied for the current power source. Any mismatch means the
+    /// firmware reset the applied state during resume. Issues no writes.
+    fn wake_readback(
+        &mut self,
+        expected_mode: u8,
+        expected_cpu: u8,
+        expected_gpu: u8,
+        expected_fan_hundreds: u8,
+    ) -> Result<thermal::WakeVerifyOutcome, ThermalError> {
+        let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(expected_mode)?;
+        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
+            let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_mode(fan))?;
+            let (observed_mode, _manual) = thermal::decode_fan_mode(fan, &reply)?;
+            if observed_mode != expected_mode {
+                return Ok(thermal::WakeVerifyOutcome::StateReset);
+            }
+        }
+        if mode == thermal::PerformanceMode::Custom {
+            for (fan, level) in
+                [(thermal::FanId::Cpu, expected_cpu), (thermal::FanId::Gpu, expected_gpu)]
+            {
+                let reply: [u8; 80] = self.send_thermal(&thermal::get_boost(fan))?;
+                if thermal::decode_boost(fan, &reply)? != level {
+                    return Ok(thermal::WakeVerifyOutcome::StateReset);
+                }
+            }
+        }
+        if expected_fan_hundreds != 0 {
+            let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_speed(thermal::FanId::Cpu))?;
+            let observed: u16 = thermal::decode_fan_setpoint(thermal::FanId::Cpu, &reply)?;
+            if observed != u16::from(expected_fan_hundreds) * 100 {
+                return Ok(thermal::WakeVerifyOutcome::StateReset);
+            }
+        }
+        Ok(thermal::WakeVerifyOutcome::StateHeld)
+    }
+
+    /// Re-latch only the GPU custom boost after a dGPU inactive-to-active
+    /// transition (Blade 16 2025). In Custom mode, write then read back the GPU
+    /// zone's custom level (0x07/0x87), touching no CPU state and no fan state;
+    /// returns whether a command was issued. Non-Custom modes issue nothing.
+    fn relatch_gpu_custom_boost(
+        &mut self,
+        mode: thermal::PerformanceMode,
+        gpu_level: u8,
+    ) -> Result<bool, ThermalError> {
+        if self.thermal_safety.writes_disabled() {
+            return Err(ThermalError::WritesDisabled);
+        }
+        let plan: Vec<thermal::ThermalCommand> = thermal::dgpu_resume_plan(mode, gpu_level);
+        if plan.is_empty() {
+            return Ok(false);
+        }
+        // The plan is only built in Custom; validate the level before any write so
+        // an unvalidated level (e.g. Extreme) is rejected rather than sent.
+        let level: u8 = thermal::validate_custom_level(gpu_level)?;
+        for command in &plan {
+            let reply: [u8; 80] = self.send_thermal(command)?;
+            if command.command_id == 0x87 {
+                let observed: u8 = thermal::decode_boost(thermal::FanId::Gpu, &reply)?;
+                if observed != level {
+                    return Err(ThermalError::ReadbackMismatch {
+                        command_id: 0x87,
+                        requested: level,
+                        observed,
+                    });
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn set_rpm(&mut self, zone: u8) -> Result<(), TransportError> {

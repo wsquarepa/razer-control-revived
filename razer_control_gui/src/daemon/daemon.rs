@@ -29,34 +29,9 @@ use crate::kbd::Effect;
 // The dGPU's power zone (custom-mode GPU boost / TGP) only latches while the
 // dGPU is runtime-active. At boot — and any time no GPU client is running — the
 // dGPU is runtime-suspended, so the profile applied at startup does not stick
-// for the GPU; a game then wakes the dGPU at the balanced TGP. Re-applying the
-// profile each time the dGPU resumes makes custom-mode GPU boost take effect.
+// for the GPU; a game then wakes the dGPU at the balanced TGP. Re-latching GPU
+// boost each time the dGPU resumes makes custom-mode GPU boost take effect.
 const DGPU_RESUME_POLL_SECS: u64 = 2;
-
-// On system resume the laptop firmware resets the GPU power zone to its default,
-// and may finish that reset several seconds after the wake signal — so a single
-// post-wake re-apply can fire too early and lose the race, leaving the dGPU at
-// the balanced TGP. A game running across the suspend keeps the dGPU active, so
-// the suspended->active watcher never fires either. Re-asserting the profile a
-// few times across a settling window re-latches custom-mode GPU boost whenever
-// the firmware finishes its reset.
-//
-// send_report now confirms each write against the EC (busy-poll until success),
-// so a re-apply that lands is known to have landed and this no longer needs to
-// brute-force comms reliability; the remaining repeats only cover the firmware
-// finishing its GPU-power-zone reset a few seconds into the settling window.
-const WAKE_SETTLE_REAPPLIES: u32 = 3;
-const WAKE_SETTLE_INTERVAL_SECS: u64 = 2;
-
-// A single re-apply when the dGPU first goes active can lose the same race the
-// wake path guards against: after a system resume the firmware may still be
-// finishing its GPU-power-zone reset when a game wakes the dGPU, overwriting a
-// one-shot re-apply back to the balanced TGP. Re-asserting the profile across
-// the next few poll ticks — but only while the dGPU stays active — re-latches
-// custom-mode GPU boost once the firmware has settled. With confirmed writes
-// (see send_report) this only needs to span the firmware's settle window, not
-// compensate for dropped commands.
-const DGPU_RESUME_REAPPLIES: u32 = 3;
 
 // After a fixed fan speed is applied on the Blade 16 2025, let the fans spin up
 // before the first tachometer check, then verify every couple of seconds. A
@@ -415,28 +390,43 @@ fn start_battery_monitor_task() -> JoinHandle<()> {
         let proxy_login = dbus_system.with_proxy("org.freedesktop.login1", "/org/freedesktop/login1", time::Duration::from_millis(5000));
         let _id = proxy_login.match_signal(|h: login1::OrgFreedesktopLogin1ManagerPrepareForSleep, _: &Connection, _: &Message| {
             println!("PrepareForSleep {:?}", h.start);
-            if let Ok(mut d) = DEV_MANAGER.lock() {
-                d.set_ac_state_get();
-                if h.start {
+            if h.start {
+                if let Ok(mut d) = DEV_MANAGER.lock() {
+                    d.set_ac_state_get();
                     d.light_off();
-                } else {
-                    d.restore_light();
-
-                    // The system just woke up. UPower can be slow to update its AC state, and the
-                    // firmware resets the GPU power zone during resume and may finish that reset
-                    // seconds later. Re-read AC and re-apply the profile across a settling window so
-                    // the correct profile re-latches whenever both have settled.
-                    thread::spawn(|| {
-                        for _ in 0..WAKE_SETTLE_REAPPLIES {
-                            thread::sleep(time::Duration::from_secs(WAKE_SETTLE_INTERVAL_SECS));
-                            if let Ok(mut dev) = DEV_MANAGER.lock() {
-                                println!("Post-wake re-apply (settling)");
-                                dev.set_ac_state_get();
-                                dev.log_hw_power_state("post-wake");
-                            }
-                        }
-                    });
                 }
+                return true;
+            }
+            // The system just woke up. Run the burst-free post-wake sequence: one
+            // immediate verified apply, then one getter-only re-verification
+            // WAKE_DELAYED_VERIFY_SECS later that authorizes at most one repair.
+            // The immediate apply is universal (non-02C6 keeps its single re-apply);
+            // the delayed getter-only readback is 02C6-only (see wake_delayed_reverify).
+            let is_blade = match DEV_MANAGER.lock() {
+                Ok(mut d) => {
+                    d.restore_light();
+                    d.is_blade_16_2025()
+                }
+                Err(_) => return true,
+            };
+            for step in thermal::wake_sequence() {
+                if !is_blade && step.kind == thermal::WakeStepKind::DelayedReadback {
+                    continue;
+                }
+                thread::spawn(move || {
+                    if step.delay_secs > 0 {
+                        thread::sleep(time::Duration::from_secs(step.delay_secs));
+                    }
+                    if let Ok(mut d) = DEV_MANAGER.lock() {
+                        match step.kind {
+                            thermal::WakeStepKind::ApplyAndVerify => {
+                                d.set_ac_state_get();
+                                d.log_hw_power_state("post-wake");
+                            }
+                            thermal::WakeStepKind::DelayedReadback => d.wake_delayed_reverify(),
+                        }
+                    }
+                });
             }
             true
         });
@@ -449,17 +439,15 @@ fn start_battery_monitor_task() -> JoinHandle<()> {
     })
 }
 
-/// Re-applies the saved power profile whenever the dGPU transitions from
-/// runtime-suspended to active, so custom-mode GPU boost latches once a GPU
-/// client (e.g. a game) powers the dGPU up. Each transition starts a settling
-/// burst (re-asserting on the next few poll ticks while the dGPU stays active)
-/// so a late post-resume firmware reset cannot leave the dGPU at the balanced
-/// TGP. See DGPU_RESUME_POLL_SECS and DGPU_RESUME_REAPPLIES.
+/// Re-latches GPU boost once whenever the dGPU transitions from runtime-suspended
+/// to active, so custom-mode GPU boost latches when a GPU client (e.g. a game)
+/// powers the dGPU up. The confirmed-write transport (see send_report) means one
+/// re-latch per transition is enough; no settling burst is needed. See
+/// `relatch_dgpu_boost` for the 02C6 GPU-only path.
 fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
     thread::spawn(|| {
         let mut dgpu_path = gpu::find_dgpu_sysfs_path();
         let mut was_active = false;
-        let mut reapplies_remaining: u32 = 0;
         loop {
             thread::sleep(time::Duration::from_secs(DGPU_RESUME_POLL_SECS));
             if dgpu_path.is_none() {
@@ -470,15 +458,9 @@ fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
                 .and_then(|p| std::fs::read_to_string(p.join("power/runtime_status")).ok())
                 .map_or(false, |s| s.trim() == "active");
             if active && !was_active {
-                println!("dGPU resumed — re-applying power profile (settling)");
-                reapplies_remaining = DGPU_RESUME_REAPPLIES;
-            }
-            if active && reapplies_remaining > 0 {
                 if let Ok(mut d) = DEV_MANAGER.lock() {
-                    d.reapply_power_mode();
-                    d.log_hw_power_state("dgpu-resume");
+                    d.relatch_dgpu_boost();
                 }
-                reapplies_remaining -= 1;
             }
             was_active = active;
         }
@@ -537,6 +519,11 @@ pub fn start_shutdown_task() -> JoinHandle<()> {
         
         // If we reach this point, we have a signal and it is time to exit
         println!("Received signal, cleaning up");
+        // Return the fans to firmware-automatic control before exit if a fixed
+        // speed is armed, so no manual fan target is left latched with no monitor.
+        if let Ok(mut d) = DEV_MANAGER.lock() {
+            d.restore_automatic_on_exit();
+        }
         let json = match EFFECT_MANAGER.lock() {
             Ok(mut mgr) => mgr.save(),
             Err(e) => {

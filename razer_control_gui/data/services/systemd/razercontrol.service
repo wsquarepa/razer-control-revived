@@ -1,6 +1,8 @@
 [Unit]
 Description=Razer laptop control daemon
 After=default.target
+StartLimitIntervalSec=60
+StartLimitBurst=2
 
 [Service]
 Type=simple
