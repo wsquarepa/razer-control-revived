@@ -2473,10 +2473,12 @@ fn classify_response(request: &RazerPacket, response: &RazerPacket) -> ResponseA
         }
         return ResponseAction::KeepPolling;
     }
+    // remaining_packets is deliberately not compared: the Blade 16 2025 EC uses
+    // it as reply metadata (the 0x80 fan-ID reply carries the payload length
+    // there), so echoing the request's 0 back is not part of the contract.
     if request.id != response.id
         || response.command_class != request.command_class
         || response.command_id != request.command_id
-        || response.remaining_packets != request.remaining_packets
     {
         return ResponseAction::KeepPolling;
     }
@@ -2571,6 +2573,18 @@ mod tests {
     fn accepts_matching_success() {
         let request = RazerPacket::new(0x0d, 0x02, 0x04);
         let response = reply(0x0d, 0x02, RazerPacket::RAZER_CMD_SUCCESSFUL);
+        assert_eq!(classify_response(&request, &response), ResponseAction::Accept);
+    }
+
+    #[test]
+    fn accepts_success_with_nonzero_remaining_packets() {
+        // Observed on Blade 16 2025 hardware: the 0x80 fan-ID reply carries the
+        // payload length in remaining_packets (0x0003 for [count, id, id]) while
+        // the request always sends 0. The field is reply metadata, not part of
+        // the request/response identity.
+        let request = RazerPacket::new(0x0d, 0x80, 0x50);
+        let mut response = reply(0x0d, 0x80, RazerPacket::RAZER_CMD_SUCCESSFUL);
+        response.remaining_packets = 0x0003;
         assert_eq!(classify_response(&request, &response), ResponseAction::Accept);
     }
 
