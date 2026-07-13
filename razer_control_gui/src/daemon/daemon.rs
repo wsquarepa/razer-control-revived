@@ -326,6 +326,7 @@ fn start_battery_monitor_task() -> JoinHandle<()> {
                             if let Ok(mut dev) = DEV_MANAGER.lock() {
                                 println!("Post-wake re-apply (settling)");
                                 dev.set_ac_state_get();
+                                dev.log_hw_power_state("post-wake");
                             }
                         }
                     });
@@ -369,6 +370,7 @@ fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
             if active && reapplies_remaining > 0 {
                 if let Ok(mut d) = DEV_MANAGER.lock() {
                     d.reapply_power_mode();
+                    d.log_hw_power_state("dgpu-resume");
                 }
                 reapplies_remaining -= 1;
             }

@@ -333,6 +333,31 @@ impl DeviceManager {
         result
     }
 
+    /// Diagnostic: read the EC's actual active perf mode (per zone) and CPU/GPU
+    /// boost levels and log them against the config the daemon believes is active.
+    /// A mismatch shows the post-resume writes did not latch (firmware override or
+    /// a silent HID failure that `set_power_mode`'s unconditional `true` hides).
+    pub fn log_hw_power_state(&mut self, context: &str) {
+        let ac = match self.get_device() {
+            Some(laptop) => laptop.get_ac_state(),
+            None => return,
+        };
+        let (cfg_mode, cfg_cpu, cfg_gpu) = match self.get_ac_config(ac) {
+            Some(config) => (config.power_mode, config.cpu_boost, config.gpu_boost),
+            None => return,
+        };
+        if let Some(laptop) = self.get_device() {
+            let hw_mode_z1 = laptop.get_power_mode(0x01);
+            let hw_mode_z2 = laptop.get_power_mode(0x02);
+            let hw_cpu = laptop.get_cpu_boost();
+            let hw_gpu = laptop.get_gpu_boost();
+            println!(
+                "[verify {}] ac={} cfg(mode={} cpu={} gpu={}) hw(mode_z1={} mode_z2={} cpu={} gpu={})",
+                context, ac, cfg_mode, cfg_cpu, cfg_gpu, hw_mode_z1, hw_mode_z2, hw_cpu, hw_gpu
+            );
+        }
+    }
+
     pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> bool {
         let mut res: bool = false;
         // The power-mode command rewrites the per-zone fan-state, so re-assert
@@ -722,11 +747,17 @@ impl DeviceManager {
             self.change_idle = true;
             let config: Option<config::PowerConfig> = self.get_ac_config(online as usize);
             if let Some(config) = config {
+                println!(
+                    "set_ac_state_get: UPower online={} applying mode={} cpu={} gpu={}",
+                    online, config.power_mode, config.cpu_boost, config.gpu_boost
+                );
                 if let Some(laptop) = self.get_device() {
                     laptop.set_config(config);
                 }
             }
             self.reassert_fan_curve();
+        } else {
+            eprintln!("set_ac_state_get: UPower online() read failed; no profile applied this pass");
         }
 
     }
@@ -1180,7 +1211,7 @@ impl RazerLaptop {
         return false;
     }
 
-    fn get_gpu_boost(&mut self) -> u8 {
+    pub fn get_gpu_boost(&mut self) -> u8 {
         let mut report: RazerPacket = RazerPacket::new(0x0d, 0x87, 0x03);
         report.args[0] = 0x00;
         report.args[1] = 0x02;
