@@ -38,6 +38,12 @@ const DGPU_RESUME_POLL_SECS: u64 = 2;
 // fresh fixed target restarts the settling window.
 const THERMAL_MONITOR_SETTLE_SECS: u64 = 5;
 const THERMAL_MONITOR_POLL_SECS: u64 = 2;
+/// How long a fixed fan target may stay outside tolerance before the monitor
+/// treats it as failed. Measured on the validation unit: the EC slews manual
+/// targets at ~35-40 RPM/s from a ~1700 RPM spin-up floor, so the worst valid
+/// delta (5400 RPM targets) needs ~106s; 150s adds margin without leaving a
+/// genuinely stuck fan unhandled for long.
+const THERMAL_RAMP_DEADLINE_SECS: u64 = 150;
 
 lazy_static! {
     static ref EFFECT_MANAGER: Mutex<kbd::EffectManager> = Mutex::new(kbd::EffectManager::new());
@@ -455,7 +461,8 @@ fn start_thermal_monitor_task() -> JoinHandle<()> {
     thread::spawn(|| {
         let settle = time::Duration::from_secs(THERMAL_MONITOR_SETTLE_SECS);
         let poll = time::Duration::from_secs(THERMAL_MONITOR_POLL_SECS);
-        let mut watching: Option<(thermal::ManualWatch, time::Instant)> = None;
+        let ramp = time::Duration::from_secs(THERMAL_RAMP_DEADLINE_SECS);
+        let mut watching: Option<(thermal::ManualWatch, time::Instant, time::Instant)> = None;
         loop {
             thread::sleep(poll);
             let observed = match DEV_MANAGER.lock() {
@@ -470,19 +477,27 @@ fn start_thermal_monitor_task() -> JoinHandle<()> {
                 }
             };
             let (tracked, settle_elapsed) = match watching {
-                Some((watch, settle_deadline)) => (Some(watch), time::Instant::now() >= settle_deadline),
+                Some((watch, settle_deadline, _)) => {
+                    (Some(watch), time::Instant::now() >= settle_deadline)
+                }
                 None => (None, false),
             };
             match thermal::decide_monitor_tick(tracked, observed, settle_elapsed) {
                 thermal::MonitorDecision::RestartSettle => {
                     // Newly-applied, changed, or freshly re-applied fixed target
-                    // (a bumped generation): restart its settling window.
-                    watching = Some((observed, time::Instant::now() + settle));
+                    // (a bumped generation): restart its settling window and its
+                    // ramp-convergence deadline.
+                    let now = time::Instant::now();
+                    watching = Some((observed, now + settle, now + ramp));
                 }
                 thermal::MonitorDecision::Waiting => {}
                 thermal::MonitorDecision::RunCycle => {
+                    let ramp_deadline_exceeded = match watching {
+                        Some((_, _, ramp_deadline)) => time::Instant::now() >= ramp_deadline,
+                        None => false,
+                    };
                     if let Ok(mut d) = DEV_MANAGER.lock() {
-                        d.run_thermal_verification_cycle();
+                        d.run_thermal_verification_cycle(ramp_deadline_exceeded);
                     }
                 }
             }

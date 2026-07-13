@@ -479,10 +479,9 @@ pub enum ThermalFailure {
     ReadbackMismatch,
     /// A tachometer sample read back as zero while a fixed speed was commanded.
     TelemetryZero,
-    /// An out-of-tolerance tachometer sample made no meaningful progress toward
-    /// the fixed target since the previous cycle. Covers a stalled ramp, a
-    /// regression away from the target, and an uncorrected overshoot alike.
-    RampStalled { target: u16, observed: u16, previous: u16 },
+    /// A tachometer sample was still outside tolerance after the convergence
+    /// deadline that bounds the EC's slew-limited ramp.
+    ConvergenceTimeout { target: u16, observed: u16, tolerance: u16 },
 }
 
 /// The corrective action a transition requests. Failback returns both fan zones
@@ -533,25 +532,19 @@ pub fn advance_safety(state: ThermalSafetyState, event: VerificationEvent) -> Sa
     }
 }
 
-/// The minimum per-cycle progress toward the target that keeps an
-/// out-of-tolerance sample counting as a healthy ramp. Measured on the
-/// validation unit: the EC slews manual fan targets at ~35-40 RPM/s, which is
-/// ~70-80 RPM per 2-second monitor cycle; a genuinely stuck fan delivers ~0.
-const MIN_RAMP_PROGRESS_PER_CYCLE_RPM: u16 = 50;
-
 /// Classify one fixed-mode tachometer reading against its commanded target.
 ///
 /// A zero sample (fan stopped) always fails. A sample inside
-/// `manual_tolerance` passes. Outside tolerance, the EC's slew-limited ramp is
-/// tolerated: with no `previous` sample the cycle is a baseline and passes;
-/// with one, the sample must have moved at least
-/// `MIN_RAMP_PROGRESS_PER_CYCLE_RPM` closer to the target or the cycle fails
-/// as a stalled ramp. Pure so the monitoring decision is unit-tested
-/// independent of HID I/O.
+/// `manual_tolerance` passes. Outside tolerance, the verdict depends on the
+/// caller's convergence deadline: the EC slews manual targets at a measured
+/// ~35-40 RPM/s with 100-RPM tach quantization and multi-second pauses, so an
+/// out-of-tolerance sample is a healthy ramp until the deadline and a failure
+/// after it. Pure so the monitoring decision is unit-tested independent of
+/// HID I/O.
 pub fn classify_manual_reading(
     target: FanRpm,
     observed: u16,
-    previous: Option<u16>,
+    ramp_deadline_exceeded: bool,
 ) -> VerificationEvent {
     if observed == 0 {
         return VerificationEvent::Failed(ThermalFailure::TelemetryZero);
@@ -560,19 +553,13 @@ pub fn classify_manual_reading(
     if observed.abs_diff(target.0) <= tolerance {
         return VerificationEvent::Succeeded;
     }
-    let previous: u16 = match previous {
-        None => return VerificationEvent::Succeeded,
-        Some(previous) => previous,
-    };
-    let progress: i32 =
-        i32::from(previous.abs_diff(target.0)) - i32::from(observed.abs_diff(target.0));
-    if progress >= i32::from(MIN_RAMP_PROGRESS_PER_CYCLE_RPM) {
+    if !ramp_deadline_exceeded {
         return VerificationEvent::Succeeded;
     }
-    VerificationEvent::Failed(ThermalFailure::RampStalled {
+    VerificationEvent::Failed(ThermalFailure::ConvergenceTimeout {
         target: target.0,
         observed,
-        previous,
+        tolerance,
     })
 }
 
@@ -977,76 +964,48 @@ mod tests {
         let cases: [(u16, u16); 3] = [(3400, 850), (4000, 1000), (5400, 1350)];
         for (target, tolerance) in cases {
             assert_eq!(manual_tolerance(target), tolerance);
-            assert_eq!(
-                classify_manual_reading(FanRpm(target), target, None),
-                VerificationEvent::Succeeded
-            );
-            assert_eq!(
-                classify_manual_reading(FanRpm(target), target + tolerance, Some(target)),
-                VerificationEvent::Succeeded
-            );
-            assert_eq!(
-                classify_manual_reading(FanRpm(target), target - tolerance, Some(target)),
-                VerificationEvent::Succeeded
-            );
-            assert_eq!(
-                classify_manual_reading(FanRpm(target), 0, None),
-                VerificationEvent::Failed(ThermalFailure::TelemetryZero)
-            );
-            assert_eq!(
-                classify_manual_reading(FanRpm(target), 0, Some(target)),
-                VerificationEvent::Failed(ThermalFailure::TelemetryZero)
-            );
+            for deadline_exceeded in [false, true] {
+                assert_eq!(
+                    classify_manual_reading(FanRpm(target), target, deadline_exceeded),
+                    VerificationEvent::Succeeded
+                );
+                assert_eq!(
+                    classify_manual_reading(FanRpm(target), target + tolerance, deadline_exceeded),
+                    VerificationEvent::Succeeded
+                );
+                assert_eq!(
+                    classify_manual_reading(FanRpm(target), target - tolerance, deadline_exceeded),
+                    VerificationEvent::Succeeded
+                );
+                // A stopped fan fails immediately, ramp window or not.
+                assert_eq!(
+                    classify_manual_reading(FanRpm(target), 0, deadline_exceeded),
+                    VerificationEvent::Failed(ThermalFailure::TelemetryZero)
+                );
+            }
         }
     }
 
     #[test]
-    fn first_out_of_tolerance_sample_is_a_ramp_baseline() {
+    fn out_of_tolerance_sample_is_benign_while_ramping() {
         // Measured on the validation unit: the EC slews manual targets at
-        // ~35-40 RPM/s, so the first monitored sample after an apply is far
-        // from target while the fans spin up. With no previous sample there is
-        // no progress to judge yet; the cycle records a baseline and passes.
+        // ~35-40 RPM/s with 100-RPM tach quantization and multi-second pauses,
+        // so per-cycle progress cannot be judged. Any spinning out-of-tolerance
+        // sample is healthy until the convergence deadline.
         assert_eq!(
-            classify_manual_reading(FanRpm(4000), 2000, None),
+            classify_manual_reading(FanRpm(4000), 2300, false),
             VerificationEvent::Succeeded
         );
     }
 
     #[test]
-    fn ramping_toward_target_passes_outside_tolerance() {
-        // ~70-80 RPM of progress per 2s cycle was measured during a healthy
-        // ramp; anything at or above the 50 RPM floor keeps the watch alive.
+    fn out_of_tolerance_sample_fails_after_the_convergence_deadline() {
         assert_eq!(
-            classify_manual_reading(FanRpm(4000), 2080, Some(2000)),
-            VerificationEvent::Succeeded
-        );
-        // Ramping down toward a lower target counts the same way.
-        assert_eq!(
-            classify_manual_reading(FanRpm(3400), 4920, Some(5000)),
-            VerificationEvent::Succeeded
-        );
-    }
-
-    #[test]
-    fn stalled_ramp_fails_outside_tolerance() {
-        assert_eq!(
-            classify_manual_reading(FanRpm(4000), 2020, Some(2000)),
-            VerificationEvent::Failed(ThermalFailure::RampStalled {
+            classify_manual_reading(FanRpm(4000), 2300, true),
+            VerificationEvent::Failed(ThermalFailure::ConvergenceTimeout {
                 target: 4000,
-                observed: 2020,
-                previous: 2000,
-            })
-        );
-    }
-
-    #[test]
-    fn regressing_ramp_fails_outside_tolerance() {
-        assert_eq!(
-            classify_manual_reading(FanRpm(4000), 2500, Some(2900)),
-            VerificationEvent::Failed(ThermalFailure::RampStalled {
-                target: 4000,
-                observed: 2500,
-                previous: 2900,
+                observed: 2300,
+                tolerance: 1000,
             })
         );
     }

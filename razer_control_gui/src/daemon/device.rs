@@ -1155,9 +1155,9 @@ impl DeviceManager {
     }
 
     /// Run one fixed-fan verification cycle against the EC (Blade 16 2025).
-    pub fn run_thermal_verification_cycle(&mut self) {
+    pub fn run_thermal_verification_cycle(&mut self, ramp_deadline_exceeded: bool) {
         if let Some(laptop) = self.get_device() {
-            laptop.run_manual_verification_cycle();
+            laptop.run_manual_verification_cycle(ramp_deadline_exceeded);
         }
     }
 
@@ -1376,10 +1376,6 @@ pub struct RazerLaptop {
     // monitor restarts its settle window on a wake re-latch instead of tripping
     // failback on spin-up-time tachometer samples.
     fan_apply_generation: u64,
-    // Last monitored tachometer sample per zone ([Cpu, Gpu]), reset on every
-    // fixed-fan apply. The verification cycle judges ramp progress against it
-    // because the EC slews manual targets over tens of seconds.
-    manual_tach_samples: [Option<u16>; 2],
 }
 //
 impl RazerLaptop {
@@ -1425,7 +1421,6 @@ impl RazerLaptop {
             transaction_id: 0,
             thermal_safety: thermal::ThermalSafetyState::Preflight,
             fan_apply_generation: 0,
-            manual_tach_samples: [None, None],
         };
     }
 
@@ -1850,8 +1845,6 @@ impl RazerLaptop {
                 // so the monitor restarts its settle window and does not count
                 // spin-up-time samples toward failback.
                 self.fan_apply_generation = self.fan_apply_generation.wrapping_add(1);
-                // Ramp-progress judging starts from a fresh baseline per apply.
-                self.manual_tach_samples = [None, None];
                 Ok(())
             }
         }
@@ -1872,12 +1865,15 @@ impl RazerLaptop {
     /// Run one fixed-fan verification cycle: read both tachometers, classify the
     /// outcome with the pure state machine, and on the second consecutive failure
     /// fail both zones back to firmware-automatic control and enter Disabled.
-    pub fn run_manual_verification_cycle(&mut self) {
+    /// `ramp_deadline_exceeded` is the monitor's convergence clock: before it,
+    /// out-of-tolerance samples are a healthy slew-limited ramp.
+    pub fn run_manual_verification_cycle(&mut self, ramp_deadline_exceeded: bool) {
         let target: thermal::FanRpm = match self.thermal_safety {
             thermal::ThermalSafetyState::Manual { target, .. } => target,
             _ => return,
         };
-        let event: thermal::VerificationEvent = self.read_manual_cycle_event(target);
+        let event: thermal::VerificationEvent =
+            self.read_manual_cycle_event(target, ramp_deadline_exceeded);
         if let thermal::VerificationEvent::Failed(failure) = event {
             eprintln!("thermal verification cycle failed: {failure:?}");
         }
@@ -1892,13 +1888,16 @@ impl RazerLaptop {
     /// Read both zones' current tachometer RPM and classify the cycle. A failed
     /// read short-circuits to a Transport failure; otherwise each zone's sample
     /// is classified against the target and the first failure wins.
-    fn read_manual_cycle_event(&mut self, target: thermal::FanRpm) -> thermal::VerificationEvent {
-        for (index, fan) in [thermal::FanId::Cpu, thermal::FanId::Gpu].into_iter().enumerate() {
+    fn read_manual_cycle_event(
+        &mut self,
+        target: thermal::FanRpm,
+        ramp_deadline_exceeded: bool,
+    ) -> thermal::VerificationEvent {
+        for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
             match self.read_current_fan_rpm(fan) {
                 Ok(reading) => {
-                    let previous: Option<u16> = self.manual_tach_samples[index];
-                    self.manual_tach_samples[index] = Some(reading.0);
-                    match thermal::classify_manual_reading(target, reading.0, previous) {
+                    match thermal::classify_manual_reading(target, reading.0, ramp_deadline_exceeded)
+                    {
                         thermal::VerificationEvent::Succeeded => continue,
                         failed => return failed,
                     }
