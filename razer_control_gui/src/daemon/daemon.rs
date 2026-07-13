@@ -79,6 +79,21 @@ fn main() {
     setup_panic_hook();
     init_logging();
 
+    let flags: Vec<String> = std::env::args().skip(1).collect();
+    match thermal::parse_execution(&flags) {
+        Ok(thermal::DaemonExecution::Service) => run_service(),
+        Ok(thermal::DaemonExecution::PreflightOnly) => run_preflight_only(),
+        Ok(thermal::DaemonExecution::CollectThermalLimits) => run_limit_collection(),
+        Err(error) => {
+            eprintln!("invalid arguments: {error}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Discover the supported device and run the one-time config migration, exiting
+/// nonzero on any failure. Shared by every execution mode.
+fn discover_and_migrate_or_exit() {
     if let Ok(mut d) = DEV_MANAGER.lock() {
         d.discover_devices();
         if let Some(laptop) = d.get_device() {
@@ -97,7 +112,73 @@ fn main() {
         println!("error loading supported devices");
         std::process::exit(1);
     }
+}
 
+/// `--preflight-only`: run the getter-only sweep and exit with its result. A
+/// failed preflight exits nonzero without touching thermal or power state.
+fn run_preflight_only() {
+    discover_and_migrate_or_exit();
+    let state = match DEV_MANAGER.lock() {
+        Ok(mut d) => d.preflight(),
+        Err(_) => {
+            eprintln!("device manager unavailable");
+            std::process::exit(1);
+        }
+    };
+    match state {
+        thermal::ThermalSafetyState::Ready => {
+            println!("thermal preflight passed");
+            std::process::exit(0);
+        }
+        thermal::ThermalSafetyState::Disabled => {
+            eprintln!("thermal preflight failed");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `--collect-thermal-limits`: run the supervised mode-global limit sweep and
+/// print the readings, exiting nonzero if collection or restoration failed.
+fn run_limit_collection() {
+    discover_and_migrate_or_exit();
+    let result = match DEV_MANAGER.lock() {
+        Ok(mut d) => d.collect_thermal_limits(),
+        Err(_) => {
+            eprintln!("device manager unavailable");
+            std::process::exit(1);
+        }
+    };
+    match result {
+        Ok(limits) => {
+            for entry in &limits {
+                println!("{entry:?}");
+            }
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("thermal limit collection failed: {error:?}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Normal daemon service: discover, migrate, run preflight, then apply saved
+/// state only if preflight passed, and enter the socket/event loop regardless.
+fn run_service() {
+    discover_and_migrate_or_exit();
+
+    // Automatic saved-state application is gated on a passing preflight. On a
+    // failed sweep the daemon stays up in the Disabled state and sends no
+    // thermal or power writes; the socket loop below still runs.
+    let safety: thermal::ThermalSafetyState = match DEV_MANAGER.lock() {
+        Ok(mut d) => d.preflight(),
+        Err(_) => thermal::ThermalSafetyState::Disabled,
+    };
+    if safety == thermal::ThermalSafetyState::Disabled {
+        eprintln!(
+            "thermal preflight failed: automatic thermal/power application disabled; socket stays up"
+        );
+    }
 
     if let Ok(mut d) = DEV_MANAGER.lock() {
         let dbus_system = match Connection::new_system() {
@@ -111,7 +192,10 @@ fn main() {
         use battery::OrgFreedesktopUPowerDevice;
         if let Ok(online) = proxy_ac.online() {
             println!("Online AC0: {:?}", online);
-            d.set_ac_state(online);
+            match safety {
+                thermal::ThermalSafetyState::Ready => d.set_ac_state(online),
+                thermal::ThermalSafetyState::Disabled => d.set_ac_index(online),
+            }
             d.restore_standard_effect();
             d.restore_bho();
             // Only load per-key RGB effects if device supports custom frames.

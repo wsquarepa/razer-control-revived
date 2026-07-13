@@ -23,6 +23,16 @@ impl FanId {
             FanId::Gpu => 2,
         }
     }
+
+    /// Map an EC fan-ID byte back to a zone. Only the two documented zones are
+    /// recognized; every other byte is rejected rather than defaulted.
+    pub const fn from_wire(byte: u8) -> Option<FanId> {
+        match byte {
+            1 => Some(FanId::Cpu),
+            2 => Some(FanId::Gpu),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -330,11 +340,7 @@ pub fn decode_fan_ids(args: &[u8; 80]) -> Result<[FanId; 2], ThermalDecodeError>
 }
 
 fn decode_fan_id_byte(raw: u8, index: usize) -> Result<FanId, ThermalDecodeError> {
-    match raw {
-        1 => Ok(FanId::Cpu),
-        2 => Ok(FanId::Gpu),
-        _ => Err(ThermalDecodeError::UnknownFanId { id: raw, index }),
-    }
+    FanId::from_wire(raw).ok_or(ThermalDecodeError::UnknownFanId { id: raw, index })
 }
 
 /// Decode a 0x88 Get Thermal Fan Current Speed reply: `[profile=1, fan_id,
@@ -365,6 +371,123 @@ pub fn decode_fan_limits(args: &[u8; 80]) -> Result<FanLimits, ThermalDecodeErro
         return Err(ThermalDecodeError::InvertedLimits { min, default, max });
     }
     Ok(FanLimits { min, default, max })
+}
+
+/// The getter-only diagnostic sweep the daemon runs before it trusts the EC.
+/// It is structurally unable to mutate EC state: it calls only the `get_*`
+/// builders, so it can never emit 0x01 (Set Fan Speed), 0x02 (Set Fan Mode), or
+/// 0x07 (Set Custom Level). It queries the fan-ID list once, then Get Fan Speed
+/// (0x81), Get Fan Mode (0x82), Get Custom Level (0x87), and Get Current RPM
+/// (0x88) for both zones.
+pub fn preflight_plan() -> Vec<ThermalCommand> {
+    let mut plan: Vec<ThermalCommand> = Vec::with_capacity(9);
+    plan.push(get_fan_ids());
+    for fan in [FanId::Cpu, FanId::Gpu] {
+        plan.push(get_fan_speed(fan));
+        plan.push(get_fan_mode(fan));
+        plan.push(get_boost(fan));
+        plan.push(get_current_fan_rpm(fan));
+    }
+    plan
+}
+
+/// One zone's decoded current tachometer reading, gathered during preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZoneTelemetry {
+    pub fan: FanId,
+    pub current_rpm: u16,
+}
+
+/// The typed result of a successful preflight sweep: the confirmed fan set and
+/// each zone's decoded current RPM. Absence of this report (an error instead)
+/// is what drives the daemon into its Disabled safety state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightReport {
+    pub fans: [FanId; 2],
+    pub zones: Vec<ZoneTelemetry>,
+}
+
+/// The EC-reported fan RPM limits for one performance mode, gathered during
+/// supervised limit collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModeLimits {
+    pub mode: PerformanceMode,
+    pub limits: FanLimits,
+}
+
+/// Combine a supervised-collection result with the mandatory restore result,
+/// giving restoration failure primacy: a failed restore is the terminal error
+/// even when collection had already failed, because leaving the EC parked in a
+/// probe mode is worse than losing the readings. Restoration is a parameter, so
+/// a caller must always compute it — collection failure never short-circuits the
+/// restore attempt away.
+pub fn resolve_with_restoration<T, E>(
+    collection: Result<T, E>,
+    restoration: Result<(), E>,
+) -> Result<T, E> {
+    match restoration {
+        Err(restoration_error) => Err(restoration_error),
+        Ok(()) => collection,
+    }
+}
+
+/// The safety posture after preflight. Task 7 formalizes the full state machine
+/// (adding Preflight/Manual); this task needs only the pass/fail outcome that
+/// gates automatic saved-state application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThermalSafetyState {
+    Ready,
+    Disabled,
+}
+
+/// How the daemon binary was invoked. The three modes are mutually exclusive and
+/// matched once at startup, so no per-mode behavior flag is threaded downstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonExecution {
+    Service,
+    PreflightOnly,
+    CollectThermalLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutionParseError {
+    ConflictingFlags,
+    UnknownFlag(String),
+}
+
+impl std::fmt::Display for ExecutionParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutionParseError::ConflictingFlags => write!(
+                formatter,
+                "{PREFLIGHT_ONLY_FLAG} and {COLLECT_THERMAL_LIMITS_FLAG} are mutually exclusive"
+            ),
+            ExecutionParseError::UnknownFlag(flag) => write!(formatter, "unknown flag {flag}"),
+        }
+    }
+}
+
+const PREFLIGHT_ONLY_FLAG: &str = "--preflight-only";
+const COLLECT_THERMAL_LIMITS_FLAG: &str = "--collect-thermal-limits";
+
+/// Parse the daemon's execution mode from its argument flags (argv without the
+/// program name). Any unrecognized flag or a second, different mode flag is a
+/// hard parse error; a repeated identical flag is harmless.
+pub fn parse_execution(flags: &[String]) -> Result<DaemonExecution, ExecutionParseError> {
+    let mut selected: Option<DaemonExecution> = None;
+    for flag in flags {
+        let requested = match flag.as_str() {
+            PREFLIGHT_ONLY_FLAG => DaemonExecution::PreflightOnly,
+            COLLECT_THERMAL_LIMITS_FLAG => DaemonExecution::CollectThermalLimits,
+            other => return Err(ExecutionParseError::UnknownFlag(other.to_string())),
+        };
+        match selected {
+            None => selected = Some(requested),
+            Some(existing) if existing == requested => {}
+            Some(_) => return Err(ExecutionParseError::ConflictingFlags),
+        }
+    }
+    Ok(selected.unwrap_or(DaemonExecution::Service))
 }
 
 #[cfg(test)]
@@ -711,5 +834,98 @@ mod tests {
             decode_fan_ids(&args),
             Err(ThermalDecodeError::UnknownFanId { id: 3, index: 2 })
         );
+    }
+
+    #[test]
+    fn preflight_is_getter_only() {
+        let commands: Vec<ThermalCommand> = preflight_plan();
+        assert!(commands.iter().all(|command| matches!(command.command_id, 0x80 | 0x81 | 0x82 | 0x87 | 0x88)));
+        assert!(commands.iter().all(|command| !matches!(command.command_id, 0x01 | 0x02 | 0x07)));
+    }
+
+    #[test]
+    fn preflight_queries_every_getter_for_both_zones() {
+        let commands: Vec<ThermalCommand> = preflight_plan();
+        let count = |id: u8| commands.iter().filter(|command| command.command_id == id).count();
+        assert_eq!(count(0x80), 1);
+        for per_zone_getter in [0x81_u8, 0x82, 0x87, 0x88] {
+            assert_eq!(count(per_zone_getter), 2, "getter {per_zone_getter:#x} must cover both zones");
+        }
+    }
+
+    #[test]
+    fn restoration_failure_outranks_collection_failure() {
+        // Both failed: leaving the EC in a probe mode is worse than losing the
+        // readings, so the restore error is the terminal one.
+        assert_eq!(
+            resolve_with_restoration::<i32, &str>(Err("collection"), Err("restore")),
+            Err("restore")
+        );
+    }
+
+    #[test]
+    fn collection_failure_surfaces_when_restoration_succeeds() {
+        assert_eq!(
+            resolve_with_restoration::<i32, &str>(Err("collection"), Ok(())),
+            Err("collection")
+        );
+    }
+
+    #[test]
+    fn restoration_failure_fails_a_clean_collection() {
+        assert_eq!(
+            resolve_with_restoration::<i32, &str>(Ok(7), Err("restore")),
+            Err("restore")
+        );
+    }
+
+    #[test]
+    fn successful_collection_and_restoration_return_readings() {
+        assert_eq!(resolve_with_restoration::<i32, &str>(Ok(7), Ok(())), Ok(7));
+    }
+
+    #[test]
+    fn parse_execution_defaults_to_service() {
+        assert_eq!(parse_execution(&[]), Ok(DaemonExecution::Service));
+    }
+
+    #[test]
+    fn parse_execution_selects_a_single_flag() {
+        assert_eq!(
+            parse_execution(&["--preflight-only".to_string()]),
+            Ok(DaemonExecution::PreflightOnly)
+        );
+        assert_eq!(
+            parse_execution(&["--collect-thermal-limits".to_string()]),
+            Ok(DaemonExecution::CollectThermalLimits)
+        );
+    }
+
+    #[test]
+    fn parse_execution_rejects_conflicting_flags() {
+        assert_eq!(
+            parse_execution(&[
+                "--preflight-only".to_string(),
+                "--collect-thermal-limits".to_string(),
+            ]),
+            Err(ExecutionParseError::ConflictingFlags)
+        );
+    }
+
+    #[test]
+    fn parse_execution_rejects_unknown_flag() {
+        assert_eq!(
+            parse_execution(&["--nope".to_string()]),
+            Err(ExecutionParseError::UnknownFlag("--nope".to_string()))
+        );
+    }
+
+    #[test]
+    fn fan_id_round_trips_through_wire_value() {
+        for fan in [FanId::Cpu, FanId::Gpu] {
+            assert_eq!(FanId::from_wire(fan.wire_value()), Some(fan));
+        }
+        assert_eq!(FanId::from_wire(0), None);
+        assert_eq!(FanId::from_wire(3), None);
     }
 }
