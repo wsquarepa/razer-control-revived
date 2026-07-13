@@ -9,7 +9,7 @@
 [![Downloads](https://img.shields.io/github/downloads/encomjp/razer-control-revived/total?style=flat-square&color=orange)](https://github.com/encomjp/razer-control-revived/releases)
 [![Stars](https://img.shields.io/github/stars/encomjp/razer-control-revived?style=flat-square&color=yellow)](https://github.com/encomjp/razer-control-revived/stargazers)
 
-Fan curves · Power profiles · CPU/GPU boost · Battery health · RGB effects · System tray — all in one place.
+Fixed fan control · Power profiles · CPU/GPU boost · Battery health · RGB effects · System tray — all in one place.
 
 ---
 

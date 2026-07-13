@@ -15,7 +15,7 @@
 
 A Linux userspace application to control Razer Blade laptops. **No kernel modules (DKMS) required!**
 
-This tool provides more control over your Razer laptop than Synapse does - fan curves, power profiles, CPU/GPU boost, battery health optimization, and RGB effects all in one place.
+This tool provides more control over your Razer laptop than Synapse does - Fixed fan control, power profiles, CPU/GPU boost, battery health optimization, and RGB effects all in one place.
 
 > **⚠️ DISCLAIMER:** This is experimental community software. Use at your own risk. No warranty is provided.
 

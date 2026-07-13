@@ -59,7 +59,7 @@ kde-widget/
 - Access to all controls and settings
 
 **Right-Click (Quick Menu)**
-- Fan Control - Quick access to fan curves
+- Fan Control - Quick access to automatic and fixed speeds
 - Power Profiles - Switch between Gaming/Balanced/Silent
 - RGB Control - Keyboard lighting settings
 - Battery Health - Battery charge limiter (BHO)

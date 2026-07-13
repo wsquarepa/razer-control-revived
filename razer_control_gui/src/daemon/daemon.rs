@@ -57,11 +57,6 @@ const WAKE_SETTLE_INTERVAL_SECS: u64 = 2;
 // compensate for dropped commands.
 const DGPU_RESUME_REAPPLIES: u32 = 3;
 
-// How often the smart fan-curve control loop re-evaluates temperatures and
-// drives the fans. A step lookup plus last-value equality keeps this from
-// hunting at steady state, so a short cadence is safe.
-const FAN_CURVE_POLL_SECS: u64 = 2;
-
 lazy_static! {
     static ref EFFECT_MANAGER: Mutex<kbd::EffectManager> = Mutex::new(kbd::EffectManager::new());
     // static ref CONFIG: Mutex<config::Configuration> = {
@@ -150,7 +145,6 @@ fn main() {
     start_screensaver_monitor_task();
     start_battery_monitor_task();
     start_dgpu_resume_watch_task();
-    start_fan_curve_task();
     let clean_thread = start_shutdown_task();
 
     if let Some(listener) = comms::create() {
@@ -379,84 +373,6 @@ fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
     })
 }
 
-/// Drives the fans from the user's smart fan curve when one is enabled for the
-/// current AC state. Each tick it reads only the temperatures the active source
-/// needs, then hands them to the device manager which performs the step lookup
-/// and applies the result. See FAN_CURVE_POLL_SECS.
-fn start_fan_curve_task() -> JoinHandle<()> {
-    thread::spawn(|| {
-        loop {
-            thread::sleep(time::Duration::from_secs(FAN_CURVE_POLL_SECS));
-
-            // Decide which temps to read without holding the lock across the
-            // (potentially slow) sensor reads.
-            let source = match DEV_MANAGER.lock() {
-                Ok(mut d) => d.active_fan_curve_source(),
-                Err(_) => continue,
-            };
-            let source = match source {
-                Some(s) => s,
-                None => continue, // no curve enabled for the current AC state
-            };
-
-            use comms::CurveTempSource::*;
-            let cpu_temp = match source {
-                Cpu | Both => read_cpu_temperature(),
-                Gpu => None,
-            };
-            let gpu_temp = match source {
-                Gpu | Both => read_dgpu_temperature(),
-                Cpu => None,
-            };
-
-            if let Ok(mut d) = DEV_MANAGER.lock() {
-                d.fan_curve_tick(cpu_temp, gpu_temp);
-            }
-        }
-    })
-}
-
-/// Read CPU temperature in °C from hwmon (AMD k10temp/zenpower or Intel coretemp).
-fn read_cpu_temperature() -> Option<f64> {
-    let entries = std::fs::read_dir("/sys/class/hwmon").ok()?;
-    for entry in entries.flatten() {
-        let name = match std::fs::read_to_string(entry.path().join("name")) {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let name = name.trim();
-        if name == "k10temp" || name == "zenpower" || name == "coretemp" {
-            if let Ok(content) = std::fs::read_to_string(entry.path().join("temp1_input")) {
-                if let Ok(milli) = content.trim().parse::<f64>() {
-                    return Some(milli / 1000.0);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Read dGPU (NVIDIA) temperature in °C. Returns None when the dGPU is
-/// runtime-suspended so we never spin it up just to read a temperature — an
-/// idle dGPU has no thermal load driving the fans anyway.
-fn read_dgpu_temperature() -> Option<f64> {
-    let dgpu_active = gpu::find_dgpu_sysfs_path()
-        .and_then(|p| std::fs::read_to_string(p.join("power/runtime_status")).ok())
-        .map_or(false, |s| s.trim() == "active");
-    if !dgpu_active {
-        return None;
-    }
-
-    let output = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()?.trim().parse::<f64>().ok()
-}
-
 /// Monitors signals and stops the daemon when receiving one
 pub fn start_shutdown_task() -> JoinHandle<()> {
     thread::spawn(|| {
@@ -680,12 +596,6 @@ pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::Daemon
             comms::DaemonCommand::GetStandardEffect => {
                 let (effect, params) = d.get_standard_effect();
                 Some(comms::DaemonResponse::GetStandardEffect { effect, params })
-            }
-            comms::DaemonCommand::SetFanCurve { ac, curve } if ac < 2 => {
-                Some(comms::DaemonResponse::SetFanCurve { result: d.set_fan_curve(ac, curve) })
-            }
-            comms::DaemonCommand::GetFanCurve { ac } if ac < 2 => {
-                Some(comms::DaemonResponse::GetFanCurve { curve: d.get_fan_curve(ac) })
             }
             // Reject commands with invalid ac index (>= 2)
             _ => {

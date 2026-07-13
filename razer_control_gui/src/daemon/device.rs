@@ -7,7 +7,6 @@ use hidapi::HidApi;
 use crate::dbus_mutter_idlemonitor;
 use crate::config;
 use crate::battery;
-use crate::comms::{CurveTempSource, FanCurve, FanCurvePoint};
 use dbus::blocking::Connection;
 
 const RAZER_VENDOR_ID: u16 = 0x1532;
@@ -90,12 +89,6 @@ pub struct DeviceManager {
     pub active_id: u32,
     add_active: bool,
     pub change_idle: bool,
-    /// Whether the EC is currently latched into manual fan mode by the curve
-    /// task. Cleared whenever something else may have reset the EC (power-mode
-    /// change, AC switch, resume) so the next curve tick re-asserts manual mode.
-    fan_curve_established: bool,
-    /// Last RPM the curve task wrote to both fan zones, to skip redundant writes.
-    fan_curve_last_rpm: Option<u16>,
 }
 
 impl DeviceManager {
@@ -141,8 +134,6 @@ impl DeviceManager {
             active_id: 0,
             add_active: false,
             change_idle: false,
-            fan_curve_established: false,
-            fan_curve_last_rpm: None,
         };
     }
 
@@ -308,9 +299,6 @@ impl DeviceManager {
     /// Re-apply (to hardware only, no config write) the saved power mode for the
     /// current AC state. Used to re-latch GPU boost when the dGPU resumes.
     pub fn reapply_power_mode(&mut self) -> bool {
-        // Re-applying a power mode rewrites the per-zone fan-state command, so
-        // the curve must re-assert manual mode afterwards.
-        self.fan_curve_established = false;
         let ac = match self.get_device() {
             Some(laptop) => laptop.get_ac_state(),
             None => return false,
@@ -323,14 +311,10 @@ impl DeviceManager {
             "Re-applying power profile: ac={} power_mode={} cpu_boost={} gpu_boost={}",
             ac, config.power_mode, config.cpu_boost, config.gpu_boost
         );
-        let result = match self.get_device() {
+        match self.get_device() {
             Some(laptop) => laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost),
             None => false,
-        };
-        // The power-mode reapply rewrote the fan-state command; re-latch the curve
-        // now instead of waiting for the next tick (avoids the resume-burst rattle).
-        self.reassert_fan_curve();
-        result
+        }
     }
 
     /// Diagnostic: read the EC's actual active perf mode (per zone) and CPU/GPU
@@ -360,9 +344,6 @@ impl DeviceManager {
 
     pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> bool {
         let mut res: bool = false;
-        // The power-mode command rewrites the per-zone fan-state, so re-assert
-        // manual fan mode on the next curve tick.
-        self.fan_curve_established = false;
         if let Some(config) = self.get_config() {
             config.power[ac].power_mode = pwr;
             config.power[ac].cpu_boost = cpu;
@@ -380,7 +361,6 @@ impl DeviceManager {
             }
         }
 
-        self.reassert_fan_curve();
         return res;
     }
 
@@ -418,13 +398,8 @@ impl DeviceManager {
 
     pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> bool {
         let mut res: bool = false;
-        // Auto/manual-fixed and the smart curve are mutually exclusive fan modes;
-        // selecting a fixed RPM (or auto) turns the curve off for this AC state.
-        self.fan_curve_established = false;
-        self.fan_curve_last_rpm = None;
         if let Some(config) = self.get_config() {
             config.power[ac].fan_rpm = rpm;
-            config.power[ac].fan_curve.enabled = false;
             if let Err(e) = config.write_to_file() {
                 eprintln!("Error write config {:?}", e);
             }
@@ -440,132 +415,6 @@ impl DeviceManager {
         }
 
         return res;
-    }
-
-    pub fn set_fan_curve(&mut self, ac: usize, curve: FanCurve) -> bool {
-        // Re-evaluate from scratch on the next tick (mode + RPM may both change).
-        self.fan_curve_established = false;
-        self.fan_curve_last_rpm = None;
-        let enabled = curve.enabled;
-        let fan_rpm: i32;
-        if let Some(config) = self.get_config() {
-            config.power[ac].fan_curve = curve;
-            fan_rpm = config.power[ac].fan_rpm;
-            if let Err(e) = config.write_to_file() {
-                eprintln!("Error write config {:?}", e);
-                return false;
-            }
-        } else {
-            return false;
-        }
-        // Turning the curve off hands the fans back to this state's saved
-        // auto/manual setting so they don't stay pinned at the last curve RPM.
-        if !enabled {
-            if let Some(laptop) = self.get_device() {
-                if laptop.get_ac_state() == ac {
-                    laptop.set_fan_rpm(fan_rpm as u16);
-                }
-            }
-        }
-        return true;
-    }
-
-    pub fn get_fan_curve(&mut self, ac: usize) -> FanCurve {
-        if let Some(config) = self.get_ac_config(ac) {
-            return config.fan_curve;
-        }
-        return FanCurve::new();
-    }
-
-    /// Returns the active curve's temperature source for the *current* AC state,
-    /// or `None` when no curve is enabled. Used by the daemon task to decide
-    /// which temperatures to read before driving the fans.
-    pub fn active_fan_curve_source(&mut self) -> Option<CurveTempSource> {
-        let ac = self.get_device().map(|l| l.get_ac_state())?;
-        let config = self.get_ac_config(ac)?;
-        if config.fan_curve.enabled {
-            Some(config.fan_curve.source)
-        } else {
-            None
-        }
-    }
-
-    /// One iteration of the smart fan-curve control loop. Reads the current AC
-    /// state's curve, resolves a target RPM from the supplied temperatures and
-    /// drives both fan zones. On the first tick after the curve becomes the
-    /// authority it latches manual mode (with a settle delay) before writing RPM;
-    /// at steady state it only writes RPM, and skips the write entirely when the
-    /// target is unchanged.
-    pub fn fan_curve_tick(&mut self, cpu_temp: Option<f64>, gpu_temp: Option<f64>) {
-        let ac = match self.get_device() {
-            Some(laptop) => laptop.get_ac_state(),
-            None => return,
-        };
-        let curve = match self.get_ac_config(ac) {
-            Some(config) => config.fan_curve,
-            None => return,
-        };
-        if !curve.enabled {
-            self.fan_curve_established = false;
-            self.fan_curve_last_rpm = None;
-            return;
-        }
-
-        let target = match compute_curve_rpm(&curve, cpu_temp, gpu_temp) {
-            Some(rpm) => rpm,
-            None => return, // no usable temperature this tick; leave fans as-is
-        };
-
-        let need_establish = !self.fan_curve_established;
-        if !need_establish && self.fan_curve_last_rpm == Some(target) {
-            return;
-        }
-
-        if let Some(laptop) = self.get_device() {
-            if need_establish {
-                // set_fan_manual issues two 0x0d/0x02 writes; send_report already
-                // settles 200ms after each, latching manual mode before the speed
-                // writes below. No additional sleep needed here.
-                laptop.set_fan_manual();
-            }
-            laptop.set_zone_rpm(0x01, target);
-            laptop.set_zone_rpm(0x02, target);
-        }
-        self.fan_curve_established = true;
-        self.fan_curve_last_rpm = Some(target);
-    }
-
-    /// Re-latch an active smart fan curve immediately after a code path rewrote
-    /// the EC fan-state command (power-mode reapply, AC/profile switch, resume).
-    /// Without this the curve only re-asserts on its next periodic tick (up to
-    /// FAN_CURVE_POLL_SECS later); during the dGPU-resume reapply burst that
-    /// deferred window is re-opened every ~2s, whipsawing the fans between the
-    /// firmware auto curve and the manual target. Reuses the last computed target
-    /// so no fresh temperature read is needed.
-    fn reassert_fan_curve(&mut self) {
-        let ac = match self.get_device() {
-            Some(laptop) => laptop.get_ac_state(),
-            None => return,
-        };
-        let enabled = self
-            .get_ac_config(ac)
-            .map_or(false, |config| config.fan_curve.enabled);
-        if !enabled {
-            return;
-        }
-        let target = match self.fan_curve_last_rpm {
-            Some(rpm) => rpm,
-            None => return, // never computed yet; the next curve tick establishes
-        };
-        if let Some(laptop) = self.get_device() {
-            // set_fan_manual's per-command settle (200ms after each 0x0d/0x02
-            // write) latches manual mode before the speed writes; mirrors
-            // fan_curve_tick.
-            laptop.set_fan_manual();
-            laptop.set_zone_rpm(0x01, target);
-            laptop.set_zone_rpm(0x02, target);
-        }
-        self.fan_curve_established = true;
     }
 
     pub fn set_logo_led_state(&mut self, ac:usize, logo_state: u8) -> bool {
@@ -711,9 +560,6 @@ impl DeviceManager {
     }
 
     pub fn set_ac_state(&mut self, ac: bool) {
-        // The EC may have a different fan state for the new AC profile; force the
-        // curve task to re-assert manual mode on its next tick.
-        self.fan_curve_established = false;
         if let Some(laptop) = self.get_device() {
             laptop.set_ac_state(ac);
         }
@@ -724,13 +570,9 @@ impl DeviceManager {
                 laptop.set_config(config);
             }
         }
-        self.reassert_fan_curve();
     }
 
     pub fn set_ac_state_get(&mut self) {
-        // Called on resume (and AC re-reads): the firmware resets fan state on
-        // wake, so re-assert manual mode on the next curve tick.
-        self.fan_curve_established = false;
         let dbus_system = match Connection::new_system() {
             Ok(conn) => conn,
             Err(e) => {
@@ -755,7 +597,6 @@ impl DeviceManager {
                     laptop.set_config(config);
                 }
             }
-            self.reassert_fan_curve();
         } else {
             eprintln!("set_ac_state_get: UPower online() read failed; no profile applied this pass");
         }
@@ -1021,11 +862,7 @@ impl RazerLaptop {
             ret |= self.set_logo_led_state(0);
         }
         ret |= self.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost);
-        // When a smart curve owns the fans, leave the speed to the curve task so
-        // an AC/profile switch doesn't briefly drop the fans to auto/fixed.
-        if !config.fan_curve.enabled {
-            ret |= self.set_fan_rpm(config.fan_rpm as u16);
-        }
+        ret |= self.set_fan_rpm(config.fan_rpm as u16);
 
         return ret;
     }
@@ -1290,21 +1127,6 @@ impl RazerLaptop {
         return res * 100;
     }
 
-    /// Latch both fan zones into manual mode (fanModeValue=1) without setting a
-    /// speed. Used by the curve task before its first speed write after a transition.
-    pub fn set_fan_manual(&mut self) -> bool {
-        let zone1 = self.set_zone_fan_state(0x01, 0x01);
-        let zone2 = self.set_zone_fan_state(0x02, 0x01);
-        return zone1 && zone2;
-    }
-
-    /// Set a single fan zone's RPM (clamped to the model range). Assumes the
-    /// zone is already in manual mode.
-    pub fn set_zone_rpm(&mut self, zone: u8, rpm: u16) -> bool {
-        self.fan_rpm = self.clamp_fan(rpm);
-        return self.set_rpm(zone);
-    }
-
     /// Read fan RPM from EC hardware.
     /// Note: on many Razer models this returns the configured target,
     /// not measured tachometer RPM (no tach register exposed via USB HID).
@@ -1542,38 +1364,6 @@ fn thermal_settle_ms(command_class: u8, command_id: u8) -> u64 {
         (0x0d, 0x02) => 200,
         (0x0d, 0x01) | (0x0d, 0x07) => 100,
         _ => 0,
-    }
-}
-
-/// Step/ceiling lookup: returns the RPM of the lowest curve point whose
-/// `temp_c` is still strictly greater than `temp`. Above the highest point the
-/// daemon clamps to the top point's RPM (Synapse stops updating there, which is
-/// unsafe for sustained load). Points must be sorted by `temp_c` ascending.
-fn lookup_rpm(points: &[FanCurvePoint], temp: f64) -> Option<u16> {
-    let last = points.last()?;
-    for point in points {
-        if f64::from(point.temp_c) > temp {
-            return Some(point.rpm);
-        }
-    }
-    Some(last.rpm)
-}
-
-/// Resolve a single target RPM for both fan zones from a curve and the available
-/// temperatures. For `Both`, each temp is looked up on its own curve and the
-/// higher resulting RPM wins (NOT the higher temperature).
-fn compute_curve_rpm(curve: &FanCurve, cpu_temp: Option<f64>, gpu_temp: Option<f64>) -> Option<u16> {
-    let cpu_rpm = cpu_temp.and_then(|t| lookup_rpm(&curve.cpu_points, t));
-    let gpu_rpm = gpu_temp.and_then(|t| lookup_rpm(&curve.gpu_points, t));
-    match curve.source {
-        CurveTempSource::Cpu => cpu_rpm,
-        CurveTempSource::Gpu => gpu_rpm,
-        CurveTempSource::Both => match (cpu_rpm, gpu_rpm) {
-            (Some(c), Some(g)) => Some(c.max(g)),
-            (Some(c), None) => Some(c),
-            (None, Some(g)) => Some(g),
-            (None, None) => None,
-        },
     }
 }
 

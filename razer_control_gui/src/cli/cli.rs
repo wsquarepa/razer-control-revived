@@ -63,8 +63,6 @@ enum ReadAttr {
     FanRpm,
     /// Read GPU status information
     Gpu,
-    /// Read the smart fan curve
-    FanCurve(AcStateParam),
 }
 
 #[derive(Subcommand)]
@@ -85,8 +83,6 @@ enum WriteAttr {
     RuntimePm(RuntimePmParams),
     /// Set GPU mode via envycontrol (hybrid, integrated, nvidia)
     GpuMode(GpuModeParams),
-    /// Configure the smart fan curve
-    FanCurve(FanCurveParams),
 }
 
 #[derive(Parser)]
@@ -147,44 +143,6 @@ struct RuntimePmParams {
 struct GpuModeParams {
     /// GPU mode: hybrid, integrated, or nvidia
     mode: String,
-}
-
-#[derive(Copy, Clone, ValueEnum)]
-enum CurveSourceArg {
-    Cpu,
-    Gpu,
-    Both,
-}
-
-impl CurveSourceArg {
-    fn to_source(self) -> comms::CurveTempSource {
-        match self {
-            CurveSourceArg::Cpu => comms::CurveTempSource::Cpu,
-            CurveSourceArg::Gpu => comms::CurveTempSource::Gpu,
-            CurveSourceArg::Both => comms::CurveTempSource::Both,
-        }
-    }
-}
-
-#[derive(Parser)]
-struct FanCurveParams {
-    /// battery/plugged in
-    ac_state: AcState,
-    /// Temperature source driving the curve
-    #[arg(long)]
-    source: Option<CurveSourceArg>,
-    /// Enable the smart fan curve
-    #[arg(long, conflicts_with = "disable")]
-    enable: bool,
-    /// Disable the smart fan curve (back to auto/manual)
-    #[arg(long)]
-    disable: bool,
-    /// CPU curve points as temp:rpm pairs, e.g. 40:2200,60:3000,80:4500
-    #[arg(long)]
-    cpu_points: Option<String>,
-    /// GPU curve points as temp:rpm pairs, e.g. 40:2200,60:3000,80:4500
-    #[arg(long)]
-    gpu_points: Option<String>,
 }
 
 #[derive(ValueEnum, Clone)]
@@ -357,7 +315,6 @@ fn main() {
             ReadAttr::Bho => read_bho(),
             ReadAttr::FanRpm => read_actual_fan_rpm(),
             ReadAttr::Gpu => read_gpu_status(),
-            ReadAttr::FanCurve(AcStateParam { ac_state }) => read_fan_curve(ac_state.as_index()),
         },
         Args::Write { attr } => match attr {
             WriteAttr::Fan(FanParams { ac_state, speed }) => {
@@ -387,7 +344,6 @@ fn main() {
             WriteAttr::GpuMode(GpuModeParams { mode }) => {
                 write_gpu_mode(&mode)
             }
-            WriteAttr::FanCurve(params) => write_fan_curve(params),
         },
         Args::Effect { effect } => match effect {
             Effect::Static(params) => send_effect(
@@ -853,119 +809,3 @@ fn write_gpu_mode(mode: &str) {
     }
 }
 
-fn source_label(source: comms::CurveTempSource) -> &'static str {
-    match source {
-        comms::CurveTempSource::Cpu => "CPU",
-        comms::CurveTempSource::Gpu => "GPU",
-        comms::CurveTempSource::Both => "Both (higher resulting RPM)",
-    }
-}
-
-fn format_points(points: &[comms::FanCurvePoint]) -> String {
-    points
-        .iter()
-        .map(|p| format!("{}\u{00B0}C:{}", p.temp_c, p.rpm))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn get_fan_curve(ac: usize) -> Option<comms::FanCurve> {
-    match send_data(comms::DaemonCommand::GetFanCurve { ac }) {
-        Some(comms::DaemonResponse::GetFanCurve { curve }) => Some(curve),
-        Some(_) => {
-            eprintln!("Daemon responded with invalid data!");
-            None
-        }
-        None => {
-            eprintln!("Unknown daemon error!");
-            None
-        }
-    }
-}
-
-fn read_fan_curve(ac: usize) {
-    if let Some(curve) = get_fan_curve(ac) {
-        println!("Smart fan curve: {}", if curve.enabled { "enabled" } else { "disabled" });
-        println!("Temperature source: {}", source_label(curve.source));
-        println!("CPU points: {}", format_points(&curve.cpu_points));
-        println!("GPU points: {}", format_points(&curve.gpu_points));
-    }
-}
-
-/// Parse "40:2200,60:3000,80:4500" into curve points, validating that
-/// temperatures are 0..=100 and strictly ascending.
-fn parse_points(raw: &str) -> Result<Vec<comms::FanCurvePoint>, String> {
-    let mut points: Vec<comms::FanCurvePoint> = Vec::new();
-    for pair in raw.split(',') {
-        let pair = pair.trim();
-        if pair.is_empty() {
-            continue;
-        }
-        let (temp_str, rpm_str) = pair
-            .split_once(':')
-            .ok_or_else(|| format!("Invalid point '{}' (expected temp:rpm)", pair))?;
-        let temp_c: u8 = temp_str
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid temperature '{}'", temp_str))?;
-        let rpm: u16 = rpm_str
-            .trim()
-            .parse()
-            .map_err(|_| format!("Invalid RPM '{}'", rpm_str))?;
-        if temp_c > 100 {
-            return Err(format!("Temperature {} out of range (0-100)", temp_c));
-        }
-        if let Some(last) = points.last() {
-            if temp_c <= last.temp_c {
-                return Err("Points must be sorted by ascending temperature".to_string());
-            }
-        }
-        points.push(comms::FanCurvePoint { temp_c, rpm });
-    }
-    if points.is_empty() {
-        return Err("No valid points provided".to_string());
-    }
-    Ok(points)
-}
-
-fn write_fan_curve(params: FanCurveParams) {
-    let ac = params.ac_state.as_index();
-    let mut curve = match get_fan_curve(ac) {
-        Some(c) => c,
-        None => return,
-    };
-
-    if let Some(source) = params.source {
-        curve.source = source.to_source();
-    }
-    if params.enable {
-        curve.enabled = true;
-    }
-    if params.disable {
-        curve.enabled = false;
-    }
-    if let Some(raw) = params.cpu_points.as_deref() {
-        match parse_points(raw) {
-            Ok(points) => curve.cpu_points = points,
-            Err(e) => Cli::command().error(ErrorKind::InvalidValue, e).exit(),
-        }
-    }
-    if let Some(raw) = params.gpu_points.as_deref() {
-        match parse_points(raw) {
-            Ok(points) => curve.gpu_points = points,
-            Err(e) => Cli::command().error(ErrorKind::InvalidValue, e).exit(),
-        }
-    }
-
-    match send_data(comms::DaemonCommand::SetFanCurve { ac, curve }) {
-        Some(comms::DaemonResponse::SetFanCurve { result }) => {
-            if result {
-                read_fan_curve(ac);
-            } else {
-                eprintln!("Failed to save fan curve");
-            }
-        }
-        Some(_) => eprintln!("Daemon responded with invalid data!"),
-        None => eprintln!("Unknown daemon error!"),
-    }
-}
