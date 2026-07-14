@@ -3,6 +3,8 @@ mod daemon;
 #[allow(dead_code)]
 mod telemetry;
 mod theme;
+#[allow(dead_code)]
+mod widgets;
 
 use iced::widget::{container, text};
 use iced::{Element, Task, Theme, window};
