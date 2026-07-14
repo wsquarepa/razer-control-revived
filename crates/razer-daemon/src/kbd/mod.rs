@@ -78,11 +78,19 @@ impl EffectLayer {
             Ok(mut x) => {
                 let keys = match serde_json::to_value(&self.key_mask) {
                     Ok(k) => k,
-                    Err(e) => { eprintln!("Failed to serialize key_mask: {}", e); return None; }
+                    Err(e) => {
+                        eprintln!("Failed to serialize key_mask: {}", e);
+                        return None;
+                    }
                 };
                 match x.as_object_mut() {
-                    Some(obj) => { obj.insert(String::from("key_mask"), keys); }
-                    None => { eprintln!("Effect save is not a JSON object"); return None; }
+                    Some(obj) => {
+                        obj.insert(String::from("key_mask"), keys);
+                    }
+                    None => {
+                        eprintln!("Effect save is not a JSON object");
+                        return None;
+                    }
                 }
                 Some(x)
             }
@@ -97,7 +105,10 @@ impl EffectLayer {
         }
         let key_mask: Vec<bool> = match serde_json::from_value(json["key_mask"].clone()) {
             Ok(v) => v,
-            Err(e) => { eprintln!("Failed to deserialize key_mask: {}", e); return None; }
+            Err(e) => {
+                eprintln!("Failed to deserialize key_mask: {}", e);
+                return None;
+            }
         };
         if key_mask.len() != 90 {
             eprintln!(
@@ -108,11 +119,17 @@ impl EffectLayer {
         }
         let name: String = match serde_json::from_value(json["name"].clone()) {
             Ok(v) => v,
-            Err(e) => { eprintln!("Failed to deserialize effect name: {}", e); return None; }
+            Err(e) => {
+                eprintln!("Failed to deserialize effect name: {}", e);
+                return None;
+            }
         };
         let args: Vec<u8> = match serde_json::from_value(json["args"].clone()) {
             Ok(v) => v,
-            Err(e) => { eprintln!("Failed to deserialize effect args: {}", e); return None; }
+            Err(e) => {
+                eprintln!("Failed to deserialize effect args: {}", e);
+                return None;
+            }
         };
 
         let effect: Option<Box<dyn Effect>> = match name.as_str() {
@@ -123,7 +140,10 @@ impl EffectLayer {
             _ => None,
         };
         match effect {
-            Some(e) => Some(EffectLayer { key_mask, effect: e }),
+            Some(e) => Some(EffectLayer {
+                key_mask,
+                effect: e,
+            }),
             None => {
                 eprintln!("Effect failed to load. Invalid name: {}", name);
                 None
@@ -168,7 +188,7 @@ impl EffectManager {
         self.layers.pop();
         // If no more layers, erase keyboard rendering and set it to black
         if self.layers.is_empty() {
-            self.render_board.set_kbd_colour(0, 0, 0); 
+            self.render_board.set_kbd_colour(0, 0, 0);
             self.render_board.update_kbd(laptop);
             self.render_board.update_custom_mode(laptop);
         }

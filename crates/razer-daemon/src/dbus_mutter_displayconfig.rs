@@ -3,8 +3,28 @@
 use dbus::arg;
 use dbus::blocking;
 
-pub type CrtcInfo = (u32, i64, i32, i32, i32, i32, i32, u32, Vec<u32>, arg::PropMap);
-pub type OutputInfo = (u32, i64, i32, Vec<u32>, String, Vec<u32>, Vec<u32>, arg::PropMap);
+pub type CrtcInfo = (
+    u32,
+    i64,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    u32,
+    Vec<u32>,
+    arg::PropMap,
+);
+pub type OutputInfo = (
+    u32,
+    i64,
+    i32,
+    Vec<u32>,
+    String,
+    Vec<u32>,
+    Vec<u32>,
+    arg::PropMap,
+);
 pub type ModeInfo = (u32, i64, u32, u32, f64, u32);
 pub type DisplayResources = (u32, Vec<CrtcInfo>, Vec<OutputInfo>, Vec<ModeInfo>, i32, i32);
 pub type CrtcConfig<'a> = (
@@ -16,7 +36,10 @@ pub type CrtcConfig<'a> = (
     Vec<u32>,
     ::std::collections::HashMap<&'a str, arg::Variant<Box<dyn arg::RefArg>>>,
 );
-pub type OutputConfig<'a> = (u32, ::std::collections::HashMap<&'a str, arg::Variant<Box<dyn arg::RefArg>>>);
+pub type OutputConfig<'a> = (
+    u32,
+    ::std::collections::HashMap<&'a str, arg::Variant<Box<dyn arg::RefArg>>>,
+);
 pub type CrtcGamma = (Vec<u16>, Vec<u16>, Vec<u16>);
 pub type MonitorId = (String, String, String, String);
 pub type MonitorModeInfo = (String, i32, i32, f64, f64, Vec<f64>, arg::PropMap);
@@ -31,30 +54,80 @@ pub type MonitorConfig<'a> = (
 pub type LogicalMonitorConfig<'a> = (i32, i32, f64, u32, bool, Vec<MonitorConfig<'a>>);
 
 pub trait OrgFreedesktopDBusProperties {
-    fn get(&self, interface_name: &str, property_name: &str) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error>;
-    fn get_all(&self, interface_name: &str) -> Result<::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, dbus::Error>;
-    fn set(&self, interface_name: &str, property_name: &str, value: arg::Variant<Box<dyn arg::RefArg>>) -> Result<(), dbus::Error>;
+    fn get(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+    ) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error>;
+    fn get_all(
+        &self,
+        interface_name: &str,
+    ) -> Result<
+        ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+        dbus::Error,
+    >;
+    fn set(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+        value: arg::Variant<Box<dyn arg::RefArg>>,
+    ) -> Result<(), dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgFreedesktopDBusProperties for blocking::Proxy<'a, C> {
-
-    fn get(&self, interface_name: &str, property_name: &str) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "Get", (interface_name, property_name, )).map(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>, )| r.0)
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgFreedesktopDBusProperties
+    for blocking::Proxy<'a, C>
+{
+    fn get(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+    ) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error> {
+        self.method_call(
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            (interface_name, property_name),
+        )
+        .map(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>,)| r.0)
     }
 
-    fn get_all(&self, interface_name: &str) -> Result<::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "GetAll", (interface_name, )).map(|r: (::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, )| r.0)
+    fn get_all(
+        &self,
+        interface_name: &str,
+    ) -> Result<
+        ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+        dbus::Error,
+    > {
+        self.method_call(
+            "org.freedesktop.DBus.Properties",
+            "GetAll",
+            (interface_name,),
+        )
+        .map(
+            |r: (
+                ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+            )| r.0,
+        )
     }
 
-    fn set(&self, interface_name: &str, property_name: &str, value: arg::Variant<Box<dyn arg::RefArg>>) -> Result<(), dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "Set", (interface_name, property_name, value, ))
+    fn set(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+        value: arg::Variant<Box<dyn arg::RefArg>>,
+    ) -> Result<(), dbus::Error> {
+        self.method_call(
+            "org.freedesktop.DBus.Properties",
+            "Set",
+            (interface_name, property_name, value),
+        )
     }
 }
 
 #[derive(Debug)]
 pub struct OrgFreedesktopDBusPropertiesPropertiesChanged {
     pub interface_name: String,
-    pub changed_properties: ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+    pub changed_properties:
+        ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
     pub invalidated_properties: Vec<String>,
 }
 
@@ -85,10 +158,12 @@ pub trait OrgFreedesktopDBusIntrospectable {
     fn introspect(&self) -> Result<String, dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgFreedesktopDBusIntrospectable for blocking::Proxy<'a, C> {
-
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgFreedesktopDBusIntrospectable
+    for blocking::Proxy<'a, C>
+{
     fn introspect(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ()).map(|r: (String, )| r.0)
+        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ())
+            .map(|r: (String,)| r.0)
     }
 }
 
@@ -97,81 +172,149 @@ pub trait OrgFreedesktopDBusPeer {
     fn get_machine_id(&self) -> Result<String, dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgFreedesktopDBusPeer for blocking::Proxy<'a, C> {
-
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgFreedesktopDBusPeer
+    for blocking::Proxy<'a, C>
+{
     fn ping(&self) -> Result<(), dbus::Error> {
         self.method_call("org.freedesktop.DBus.Peer", "Ping", ())
     }
 
     fn get_machine_id(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ()).map(|r: (String, )| r.0)
+        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ())
+            .map(|r: (String,)| r.0)
     }
 }
 
 pub trait OrgGnomeMutterDisplayConfig {
     fn get_resources(&self) -> Result<DisplayResources, dbus::Error>;
-    fn apply_configuration(&self, serial: u32, persistent: bool, crtcs: Vec<CrtcConfig>, outputs: Vec<OutputConfig>) -> Result<(), dbus::Error>;
+    fn apply_configuration(
+        &self,
+        serial: u32,
+        persistent: bool,
+        crtcs: Vec<CrtcConfig>,
+        outputs: Vec<OutputConfig>,
+    ) -> Result<(), dbus::Error>;
     fn change_backlight(&self, serial: u32, output: u32, value: i32) -> Result<i32, dbus::Error>;
     fn get_crtc_gamma(&self, serial: u32, crtc: u32) -> Result<CrtcGamma, dbus::Error>;
-    fn set_crtc_gamma(&self, serial: u32, crtc: u32, red: Vec<u16>, green: Vec<u16>, blue: Vec<u16>) -> Result<(), dbus::Error>;
+    fn set_crtc_gamma(
+        &self,
+        serial: u32,
+        crtc: u32,
+        red: Vec<u16>,
+        green: Vec<u16>,
+        blue: Vec<u16>,
+    ) -> Result<(), dbus::Error>;
     fn get_current_state(&self) -> Result<DisplayState, dbus::Error>;
-    fn apply_monitors_config(&self, serial: u32, method: u32, logical_monitors: Vec<LogicalMonitorConfig>, properties: ::std::collections::HashMap<&str, arg::Variant<Box<dyn arg::RefArg>>>) -> Result<(), dbus::Error>;
+    fn apply_monitors_config(
+        &self,
+        serial: u32,
+        method: u32,
+        logical_monitors: Vec<LogicalMonitorConfig>,
+        properties: ::std::collections::HashMap<&str, arg::Variant<Box<dyn arg::RefArg>>>,
+    ) -> Result<(), dbus::Error>;
     fn power_save_mode(&self) -> Result<i32, dbus::Error>;
     fn set_power_save_mode(&self, value: i32) -> Result<(), dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgGnomeMutterDisplayConfig for blocking::Proxy<'a, C> {
-
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgGnomeMutterDisplayConfig
+    for blocking::Proxy<'a, C>
+{
     fn get_resources(&self) -> Result<DisplayResources, dbus::Error> {
         self.method_call("org.gnome.Mutter.DisplayConfig", "GetResources", ())
     }
 
-    fn apply_configuration(&self, serial: u32, persistent: bool, crtcs: Vec<CrtcConfig>, outputs: Vec<OutputConfig>) -> Result<(), dbus::Error> {
-        self.method_call("org.gnome.Mutter.DisplayConfig", "ApplyConfiguration", (serial, persistent, crtcs, outputs, ))
+    fn apply_configuration(
+        &self,
+        serial: u32,
+        persistent: bool,
+        crtcs: Vec<CrtcConfig>,
+        outputs: Vec<OutputConfig>,
+    ) -> Result<(), dbus::Error> {
+        self.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "ApplyConfiguration",
+            (serial, persistent, crtcs, outputs),
+        )
     }
 
     fn change_backlight(&self, serial: u32, output: u32, value: i32) -> Result<i32, dbus::Error> {
-        self.method_call("org.gnome.Mutter.DisplayConfig", "ChangeBacklight", (serial, output, value, )).map(|r: (i32, )| r.0)
+        self.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "ChangeBacklight",
+            (serial, output, value),
+        )
+        .map(|r: (i32,)| r.0)
     }
 
     fn get_crtc_gamma(&self, serial: u32, crtc: u32) -> Result<CrtcGamma, dbus::Error> {
-        self.method_call("org.gnome.Mutter.DisplayConfig", "GetCrtcGamma", (serial, crtc, ))
+        self.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "GetCrtcGamma",
+            (serial, crtc),
+        )
     }
 
-    fn set_crtc_gamma(&self, serial: u32, crtc: u32, red: Vec<u16>, green: Vec<u16>, blue: Vec<u16>) -> Result<(), dbus::Error> {
-        self.method_call("org.gnome.Mutter.DisplayConfig", "SetCrtcGamma", (serial, crtc, red, green, blue, ))
+    fn set_crtc_gamma(
+        &self,
+        serial: u32,
+        crtc: u32,
+        red: Vec<u16>,
+        green: Vec<u16>,
+        blue: Vec<u16>,
+    ) -> Result<(), dbus::Error> {
+        self.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "SetCrtcGamma",
+            (serial, crtc, red, green, blue),
+        )
     }
 
     fn get_current_state(&self) -> Result<DisplayState, dbus::Error> {
         self.method_call("org.gnome.Mutter.DisplayConfig", "GetCurrentState", ())
     }
 
-    fn apply_monitors_config(&self, serial: u32, method: u32, logical_monitors: Vec<LogicalMonitorConfig>, properties: ::std::collections::HashMap<&str, arg::Variant<Box<dyn arg::RefArg>>>) -> Result<(), dbus::Error> {
-        self.method_call("org.gnome.Mutter.DisplayConfig", "ApplyMonitorsConfig", (serial, method, logical_monitors, properties, ))
+    fn apply_monitors_config(
+        &self,
+        serial: u32,
+        method: u32,
+        logical_monitors: Vec<LogicalMonitorConfig>,
+        properties: ::std::collections::HashMap<&str, arg::Variant<Box<dyn arg::RefArg>>>,
+    ) -> Result<(), dbus::Error> {
+        self.method_call(
+            "org.gnome.Mutter.DisplayConfig",
+            "ApplyMonitorsConfig",
+            (serial, method, logical_monitors, properties),
+        )
     }
 
     fn power_save_mode(&self) -> Result<i32, dbus::Error> {
-        <Self as blocking::stdintf::org_freedesktop_dbus::Properties>::get(self, "org.gnome.Mutter.DisplayConfig", "PowerSaveMode")
+        <Self as blocking::stdintf::org_freedesktop_dbus::Properties>::get(
+            self,
+            "org.gnome.Mutter.DisplayConfig",
+            "PowerSaveMode",
+        )
     }
 
     fn set_power_save_mode(&self, value: i32) -> Result<(), dbus::Error> {
-        <Self as blocking::stdintf::org_freedesktop_dbus::Properties>::set(self, "org.gnome.Mutter.DisplayConfig", "PowerSaveMode", value)
+        <Self as blocking::stdintf::org_freedesktop_dbus::Properties>::set(
+            self,
+            "org.gnome.Mutter.DisplayConfig",
+            "PowerSaveMode",
+            value,
+        )
     }
 }
 
 #[derive(Debug)]
-pub struct OrgGnomeMutterDisplayConfigMonitorsChanged {
-}
+pub struct OrgGnomeMutterDisplayConfigMonitorsChanged {}
 
 impl arg::AppendAll for OrgGnomeMutterDisplayConfigMonitorsChanged {
-    fn append(&self, _: &mut arg::IterAppend) {
-    }
+    fn append(&self, _: &mut arg::IterAppend) {}
 }
 
 impl arg::ReadAll for OrgGnomeMutterDisplayConfigMonitorsChanged {
     fn read(_: &mut arg::Iter) -> Result<Self, arg::TypeMismatchError> {
-        Ok(OrgGnomeMutterDisplayConfigMonitorsChanged {
-        })
+        Ok(OrgGnomeMutterDisplayConfigMonitorsChanged {})
     }
 }
 

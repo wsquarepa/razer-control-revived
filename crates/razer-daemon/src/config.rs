@@ -1,8 +1,8 @@
+use crate::thermal::{self, PerformanceMode, PowerSource};
 use serde::{Deserialize, Serialize};
-use std::{fs, fs::File, io, env, fmt};
 use std::io::prelude::*;
 use std::path::PathBuf;
-use crate::thermal::{self, PerformanceMode, PowerSource};
+use std::{env, fmt, fs, fs::File, io};
 
 const SETTINGS_FILE: &str = "/.local/share/razercontrol/daemon.json";
 const EFFECTS_FILE: &str = "/.local/share/razercontrol/effects.json";
@@ -15,8 +15,15 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub enum ConfigurationError {
     Io(io::Error),
     Json(serde_json::Error),
-    UnknownLegacyMode { power_source: &'static str, wire_value: u8 },
-    UnknownLegacyLevel { power_source: &'static str, zone: BoostZone, level: u8 },
+    UnknownLegacyMode {
+        power_source: &'static str,
+        wire_value: u8,
+    },
+    UnknownLegacyLevel {
+        power_source: &'static str,
+        zone: BoostZone,
+        level: u8,
+    },
 }
 
 impl fmt::Display for ConfigurationError {
@@ -26,11 +33,18 @@ impl fmt::Display for ConfigurationError {
             ConfigurationError::Json(error) => {
                 write!(formatter, "configuration JSON is invalid: {error}")
             }
-            ConfigurationError::UnknownLegacyMode { power_source, wire_value } => write!(
+            ConfigurationError::UnknownLegacyMode {
+                power_source,
+                wire_value,
+            } => write!(
                 formatter,
                 "legacy {power_source} profile has unknown power mode {wire_value} (expected 0-4)"
             ),
-            ConfigurationError::UnknownLegacyLevel { power_source, zone, level } => write!(
+            ConfigurationError::UnknownLegacyLevel {
+                power_source,
+                zone,
+                level,
+            } => write!(
                 formatter,
                 "legacy {power_source} profile has unknown {zone:?} boost level {level} (expected 0-3)"
             ),
@@ -172,10 +186,12 @@ pub fn migrate_for_pid(
     configuration: Configuration,
     pid: u16,
 ) -> Result<MigrationOutcome, ConfigurationError> {
-    if configuration.schema_version >= CURRENT_SCHEMA_VERSION
-        || pid != thermal::BLADE_16_2025_PID
-    {
-        return Ok(MigrationOutcome { configuration, warnings: vec![], migrated: false });
+    if configuration.schema_version >= CURRENT_SCHEMA_VERSION || pid != thermal::BLADE_16_2025_PID {
+        return Ok(MigrationOutcome {
+            configuration,
+            warnings: vec![],
+            migrated: false,
+        });
     }
 
     let mut migrated: Configuration = configuration;
@@ -196,7 +212,11 @@ pub fn migrate_for_pid(
         profile.fan_rpm = fan_rpm;
     }
     migrated.schema_version = CURRENT_SCHEMA_VERSION;
-    Ok(MigrationOutcome { configuration: migrated, warnings, migrated: true })
+    Ok(MigrationOutcome {
+        configuration: migrated,
+        warnings,
+        migrated: true,
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -213,7 +233,7 @@ pub struct PowerConfig {
 
 impl PowerConfig {
     pub fn new() -> PowerConfig {
-        PowerConfig{
+        PowerConfig {
             power_mode: 0,
             cpu_boost: 1,
             gpu_boost: 0,
@@ -232,7 +252,7 @@ pub struct Configuration {
     #[serde(default)]
     pub schema_version: u32,
     pub power: [PowerConfig; 2],
-    pub sync: bool, // sync light settings between ac and battery
+    pub sync: bool,    // sync light settings between ac and battery
     pub no_light: f64, // no light bellow this percentage of battery
     pub standard_effect: u8,
     pub standard_effect_params: Vec<u8>,
@@ -246,7 +266,9 @@ pub struct Configuration {
     pub gui_effect_params: Vec<u8>, // GUI effect color params (RGB bytes)
 }
 
-fn default_bho_threshold() -> u8 { 80 }
+fn default_bho_threshold() -> u8 {
+    80
+}
 
 impl Configuration {
     pub fn new() -> Configuration {
@@ -363,10 +385,12 @@ mod tests {
         configuration.power[0].power_mode = 1;
         let outcome: MigrationOutcome = migrate(configuration);
         assert_eq!(outcome.configuration.power[0].power_mode, 6);
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| matches!(warning, MigrationWarning::ModeUnavailableOnSource { .. })));
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| matches!(warning, MigrationWarning::ModeUnavailableOnSource { .. }))
+        );
     }
 
     #[test]
@@ -398,10 +422,10 @@ mod tests {
                 assert_eq!(outcome.configuration.power[ac].gpu_boost, 3);
                 // Only mode-availability may warn (battery Custom moves to 6);
                 // preserved Extreme levels never generate a warning.
-                assert!(outcome
-                    .warnings
-                    .iter()
-                    .all(|warning| matches!(warning, MigrationWarning::ModeUnavailableOnSource { .. })));
+                assert!(outcome.warnings.iter().all(|warning| matches!(
+                    warning,
+                    MigrationWarning::ModeUnavailableOnSource { .. }
+                )));
             }
         }
     }
@@ -425,10 +449,12 @@ mod tests {
             configuration.power[1].fan_rpm = out_of_range_rpm;
             let outcome: MigrationOutcome = migrate(configuration);
             assert_eq!(outcome.configuration.power[1].fan_rpm, 0);
-            assert!(outcome
-                .warnings
-                .iter()
-                .any(|warning| matches!(warning, MigrationWarning::RpmOutOfRange { .. })));
+            assert!(
+                outcome
+                    .warnings
+                    .iter()
+                    .any(|warning| matches!(warning, MigrationWarning::RpmOutOfRange { .. }))
+            );
         }
     }
 

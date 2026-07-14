@@ -1,14 +1,14 @@
 // mod kbd;
-use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
-use std::{thread, time, io, fs};
-use std::ffi::CString;
-use hidapi::HidApi;
-use crate::dbus_mutter_idlemonitor;
-use crate::config;
 use crate::battery;
+use crate::config;
+use crate::dbus_mutter_idlemonitor;
 use crate::thermal;
 use dbus::blocking::Connection;
+use hidapi::HidApi;
+use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
+use std::ffi::CString;
+use std::{fs, io, thread, time};
 
 const RAZER_VENDOR_ID: u16 = 0x1532;
 
@@ -42,13 +42,13 @@ pub struct RazerPacket {
 }
 
 impl RazerPacket {
-// Command status
-    const RAZER_CMD_NEW:u8 = 0x00;
-    const RAZER_CMD_BUSY:u8 = 0x01;
-    const RAZER_CMD_SUCCESSFUL:u8 = 0x02;
-    const RAZER_CMD_FAILURE:u8 = 0x03;
-    const RAZER_CMD_TIMEOUT:u8 = 0x04;
-    const RAZER_CMD_NOT_SUPPORTED:u8 = 0x05;
+    // Command status
+    const RAZER_CMD_NEW: u8 = 0x00;
+    const RAZER_CMD_BUSY: u8 = 0x01;
+    const RAZER_CMD_SUCCESSFUL: u8 = 0x02;
+    const RAZER_CMD_FAILURE: u8 = 0x03;
+    const RAZER_CMD_TIMEOUT: u8 = 0x04;
+    const RAZER_CMD_NOT_SUPPORTED: u8 = 0x05;
 
     fn new(command_class: u8, command_id: u8, data_size: u8) -> RazerPacket {
         RazerPacket {
@@ -71,23 +71,23 @@ impl RazerPacket {
     /// bytes [2..88); index 0 of this struct is the prepended HID report-id, so
     /// that range maps to buf[3..89] and the crc byte itself sits at buf[89].
     fn serialize(&self) -> Result<[u8; 91], TransportError> {
-        let mut buf: Vec<u8> = bincode::serialize(self).map_err(|error| {
-            TransportError::Serialization {
+        let mut buf: Vec<u8> =
+            bincode::serialize(self).map_err(|error| TransportError::Serialization {
                 command_class: self.command_class,
                 command_id: self.command_id,
                 detail: error.to_string(),
-            }
-        })?;
+            })?;
         let mut crc: u8 = 0x00;
         for byte in &buf[3..89] {
             crc ^= *byte;
         }
         buf[89] = crc;
-        buf.try_into().map_err(|buf: Vec<u8>| TransportError::Serialization {
-            command_class: self.command_class,
-            command_id: self.command_id,
-            detail: format!("serialized packet was {} bytes, expected 91", buf.len()),
-        })
+        buf.try_into()
+            .map_err(|buf: Vec<u8>| TransportError::Serialization {
+                command_class: self.command_class,
+                command_id: self.command_id,
+                detail: format!("serialized packet was {} bytes, expected 91", buf.len()),
+            })
     }
 }
 
@@ -97,21 +97,62 @@ impl RazerPacket {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportError {
     /// bincode failed to encode the request, or the encoded length was not 91.
-    Serialization { command_class: u8, command_id: u8, detail: String },
+    Serialization {
+        command_class: u8,
+        command_id: u8,
+        detail: String,
+    },
     /// The HID write (send_feature_report) failed.
-    Write { pid: u16, transaction_id: u8, command_class: u8, command_id: u8, detail: String },
+    Write {
+        pid: u16,
+        transaction_id: u8,
+        command_class: u8,
+        command_id: u8,
+        detail: String,
+    },
     /// The HID read (get_feature_report) failed.
-    Read { pid: u16, transaction_id: u8, command_class: u8, command_id: u8, detail: String },
+    Read {
+        pid: u16,
+        transaction_id: u8,
+        command_class: u8,
+        command_id: u8,
+        detail: String,
+    },
     /// The EC returned a report of an unexpected length.
-    Size { pid: u16, command_class: u8, command_id: u8, size: usize },
+    Size {
+        pid: u16,
+        command_class: u8,
+        command_id: u8,
+        size: usize,
+    },
     /// The reply bytes could not be decoded into a packet.
-    Decode { pid: u16, command_class: u8, command_id: u8, detail: String },
+    Decode {
+        pid: u16,
+        command_class: u8,
+        command_id: u8,
+        detail: String,
+    },
     /// The EC reported the command is not supported.
-    Unsupported { pid: u16, command_class: u8, command_id: u8 },
+    Unsupported {
+        pid: u16,
+        command_class: u8,
+        command_id: u8,
+    },
     /// The EC reported an explicit failure status for the command.
-    CommandFailure { pid: u16, transaction_id: u8, command_class: u8, command_id: u8, status: u8 },
+    CommandFailure {
+        pid: u16,
+        transaction_id: u8,
+        command_class: u8,
+        command_id: u8,
+        status: u8,
+    },
     /// Write and read attempts were exhausted while the EC stayed busy.
-    ExhaustedPolls { pid: u16, command_class: u8, command_id: u8, attempts: usize },
+    ExhaustedPolls {
+        pid: u16,
+        command_class: u8,
+        command_id: u8,
+        attempts: usize,
+    },
 }
 
 /// A preflight sweep failure: either a getter did not complete over the HID
@@ -146,7 +187,11 @@ pub enum ThermalError {
     Policy(thermal::ThermalPolicyError),
     /// A readback (0x82 mode, 0x87 boost, or 0x81 setpoint) decoded cleanly for
     /// its own zone but did not equal what was written.
-    ReadbackMismatch { command_id: u8, requested: u8, observed: u8 },
+    ReadbackMismatch {
+        command_id: u8,
+        requested: u8,
+        observed: u8,
+    },
     /// The safety state machine is Disabled, so the write is refused before any
     /// command is constructed and no HID I/O is attempted.
     WritesDisabled,
@@ -190,7 +235,11 @@ fn thermal_error_reason(error: &ThermalError) -> String {
         ThermalError::WritesDisabled => {
             "thermal safety is disabled; fan and power writes are refused".to_string()
         }
-        ThermalError::ReadbackMismatch { command_id, requested, observed } => format!(
+        ThermalError::ReadbackMismatch {
+            command_id,
+            requested,
+            observed,
+        } => format!(
             "readback for command {command_id:#x} returned {observed} but {requested} was written"
         ),
         other => format!("{other:?}"),
@@ -248,7 +297,10 @@ fn thermal_failure_dto(error: &ThermalError) -> razer_core::ThermalFailureDto {
         ThermalError::WritesDisabled => razer_core::ThermalFailureCode::WritesDisabled,
         ThermalError::Transport(_) => razer_core::ThermalFailureCode::Transport,
     };
-    razer_core::ThermalFailureDto { code, message: thermal_error_reason(error) }
+    razer_core::ThermalFailureDto {
+        code,
+        message: thermal_error_reason(error),
+    }
 }
 
 /// Project the daemon's internal safety posture onto the frontend DTO, dropping
@@ -279,9 +331,9 @@ fn device_file_path() -> String {
 }
 
 pub struct DeviceManager {
-    pub device: Option <RazerLaptop>,
+    pub device: Option<RazerLaptop>,
     supported_devices: Vec<SupportedDevice>,
-    pub config: Option <config::Configuration>,
+    pub config: Option<config::Configuration>,
     pub idle_id: u32,
     pub active_id: u32,
     add_active: bool,
@@ -291,7 +343,10 @@ pub struct DeviceManager {
 impl DeviceManager {
     /// Read the USB interface number for a /dev/hidrawX node from sysfs.
     fn hidraw_iface_number(hidraw_name: &str) -> Option<i32> {
-        let iface_path = format!("/sys/class/hidraw/{}/device/../bInterfaceNumber", hidraw_name);
+        let iface_path = format!(
+            "/sys/class/hidraw/{}/device/../bInterfaceNumber",
+            hidraw_name
+        );
         let raw = fs::read_to_string(iface_path).ok()?;
         i32::from_str_radix(raw.trim(), 16).ok()
     }
@@ -305,7 +360,8 @@ impl DeviceManager {
     /// Resolve VID/PID for a /dev/hidrawX node via /sys, walking up parents
     /// until we find idVendor/idProduct.
     fn hidraw_vid_pid(hidraw_name: &str) -> Option<(u16, u16)> {
-        let mut current = fs::canonicalize(format!("/sys/class/hidraw/{}/device", hidraw_name)).ok()?;
+        let mut current =
+            fs::canonicalize(format!("/sys/class/hidraw/{}/device", hidraw_name)).ok()?;
 
         for _ in 0..6 {
             let vid_path = current.join("idVendor");
@@ -322,7 +378,7 @@ impl DeviceManager {
         None
     }
 
-    pub fn new () -> DeviceManager {
+    pub fn new() -> DeviceManager {
         DeviceManager {
             device: None,
             supported_devices: vec![],
@@ -334,7 +390,10 @@ impl DeviceManager {
         }
     }
 
-    pub fn add_idle_watch(&mut self, proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor) {
+    pub fn add_idle_watch(
+        &mut self,
+        proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor,
+    ) {
         if self.change_idle {
             let mut timeout: u64 = 0;
             let mut state: usize = 0;
@@ -389,21 +448,28 @@ impl DeviceManager {
         false
     }
 
-    fn remove_watch(&mut self, proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor) {
+    fn remove_watch(
+        &mut self,
+        proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor,
+    ) {
         if proxy_idle.remove_watch(self.idle_id).is_ok() {
             println!("remove idle handler");
         }
     }
 
-    pub fn add_active_watch(&mut self, proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor) {
+    pub fn add_active_watch(
+        &mut self,
+        proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor,
+    ) {
         if self.add_active
-            && let Ok(id) = proxy_idle.add_user_active_watch() {
-                println!("active handler {:?}", id);
-                self.active_id = id;
-            }
+            && let Ok(id) = proxy_idle.add_user_active_watch()
+        {
+            println!("active handler {:?}", id);
+            self.active_id = id;
+        }
     }
 
-    pub fn read_laptops_file() -> io::Result<DeviceManager > {
+    pub fn read_laptops_file() -> io::Result<DeviceManager> {
         let path = device_file_path();
         let str: Vec<u8> = fs::read(&path)?;
         let mut res: DeviceManager = DeviceManager::new();
@@ -470,7 +536,7 @@ impl DeviceManager {
         self.add_active = false;
         let mut brightness = 0;
         let mut logo_state = 0;
-        let mut ac:usize = 0;
+        let mut ac: usize = 0;
         if let Some(laptop) = self.get_device() {
             ac = laptop.get_ac_state();
         }
@@ -487,7 +553,9 @@ impl DeviceManager {
 
     /// Check whether the current device declares a given feature.
     pub fn device_has_feature(&self, feature: &str) -> bool {
-        self.device.as_ref().is_some_and(|d| d.features.contains(&feature.to_string()))
+        self.device
+            .as_ref()
+            .is_some_and(|d| d.features.contains(&feature.to_string()))
     }
 
     pub fn restore_standard_effect(&mut self) {
@@ -505,18 +573,19 @@ impl DeviceManager {
     pub fn change_idle(&mut self, ac: usize, timeout: u32) -> bool {
         // let mut arm: bool = false;
         if let Some(config) = self.get_config()
-            && config.power[ac].idle != timeout {
-                config.power[ac].idle = timeout;
-                if config.sync {
-                    let other = (ac + 1) & 0x01;
-                    config.power[other].idle = timeout;
-                }
-                if let Err(e) = config.write_to_file() {
-                    eprintln!("Error write config {:?}", e);
-                }
-                // arm = true;
-                self.change_idle = true;
+            && config.power[ac].idle != timeout
+        {
+            config.power[ac].idle = timeout;
+            if config.sync {
+                let other = (ac + 1) & 0x01;
+                config.power[other].idle = timeout;
             }
+            if let Err(e) = config.write_to_file() {
+                eprintln!("Error write config {:?}", e);
+            }
+            // arm = true;
+            self.change_idle = true;
+        }
 
         true
     }
@@ -537,13 +606,15 @@ impl DeviceManager {
             ac, config.power_mode, config.cpu_boost, config.gpu_boost
         );
         match self.get_device() {
-            Some(laptop) => match laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost) {
-                Ok(()) => true,
-                Err(error) => {
-                    eprintln!("reapply_power_mode: set_power_mode failed: {error:?}");
-                    false
+            Some(laptop) => {
+                match laptop.set_power_mode(config.power_mode, config.cpu_boost, config.gpu_boost) {
+                    Ok(()) => true,
+                    Err(error) => {
+                        eprintln!("reapply_power_mode: set_power_mode failed: {error:?}");
+                        false
+                    }
                 }
-            },
+            }
             None => false,
         }
     }
@@ -654,10 +725,11 @@ impl DeviceManager {
                 println!("post-wake state was reset; issuing one repair");
                 let state_before: thermal::ThermalSafetyState = self
                     .get_device()
-                    .map_or(thermal::ThermalSafetyState::Ready, |laptop| laptop.thermal_safety());
-                let repair: Result<(), thermal::ThermalFailure> = self
-                    .apply_current_profile_verified()
-                    .map_err(|error| {
+                    .map_or(thermal::ThermalSafetyState::Ready, |laptop| {
+                        laptop.thermal_safety()
+                    });
+                let repair: Result<(), thermal::ThermalFailure> =
+                    self.apply_current_profile_verified().map_err(|error| {
                         eprintln!("post-wake repair failed: {error:?}");
                         thermal_failure_class(&error)
                     });
@@ -667,10 +739,11 @@ impl DeviceManager {
                     laptop.set_thermal_safety(transition.state);
                 }
                 if transition.action == Some(thermal::SafetyAction::FailbackBothFans)
-                    && let Some(laptop) = self.get_device() {
-                        let report: thermal::FailbackReport = laptop.failback_both_fans();
-                        eprintln!("post-wake repair failback to firmware-automatic: {report:?}");
-                    }
+                    && let Some(laptop) = self.get_device()
+                {
+                    let report: thermal::FailbackReport = laptop.failback_both_fans();
+                    eprintln!("post-wake repair failback to firmware-automatic: {report:?}");
+                }
                 self.log_hw_power_state("post-wake-repair");
             }
         }
@@ -729,11 +802,20 @@ impl DeviceManager {
         }
     }
 
-    pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> razer_core::CommandResult {
+    pub fn set_power_mode(
+        &mut self,
+        ac: usize,
+        pwr: u8,
+        cpu: u8,
+        gpu: u8,
+    ) -> razer_core::CommandResult {
         if self.is_blade_16_2025()
-            && let Err(policy) = validate_power_request(pwr, cpu, gpu, profile_power_source(ac)) {
-                return razer_core::CommandResult::Rejected { reason: policy.to_string() };
-            }
+            && let Err(policy) = validate_power_request(pwr, cpu, gpu, profile_power_source(ac))
+        {
+            return razer_core::CommandResult::Rejected {
+                reason: policy.to_string(),
+            };
+        }
         if let Some(config) = self.get_config() {
             config.power[ac].power_mode = pwr;
             config.power[ac].cpu_boost = cpu;
@@ -752,11 +834,15 @@ impl DeviceManager {
                 Ok(()) => razer_core::CommandResult::Applied,
                 Err(error) => {
                     eprintln!("set_power_mode failed: {error:?}");
-                    razer_core::CommandResult::Rejected { reason: thermal_error_reason(&error) }
+                    razer_core::CommandResult::Rejected {
+                        reason: thermal_error_reason(&error),
+                    }
                 }
             };
         }
-        razer_core::CommandResult::Rejected { reason: "no supported device present".to_string() }
+        razer_core::CommandResult::Rejected {
+            reason: "no supported device present".to_string(),
+        }
     }
 
     pub fn get_standard_effect(&mut self) -> (u8, Vec<u8>) {
@@ -791,12 +877,15 @@ impl DeviceManager {
         true
     }
 
-    pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> razer_core::CommandResult {
+    pub fn set_fan_rpm(&mut self, ac: usize, rpm: i32) -> razer_core::CommandResult {
         if self.is_blade_16_2025()
             && let Some(profile) = self.get_ac_config(ac)
-                && let Err(policy) = validate_fan_request(profile.power_mode, rpm) {
-                    return razer_core::CommandResult::Rejected { reason: policy.to_string() };
-                }
+            && let Err(policy) = validate_fan_request(profile.power_mode, rpm)
+        {
+            return razer_core::CommandResult::Rejected {
+                reason: policy.to_string(),
+            };
+        }
         if let Some(config) = self.get_config() {
             config.power[ac].fan_rpm = rpm;
             if let Err(e) = config.write_to_file() {
@@ -814,17 +903,21 @@ impl DeviceManager {
                 Ok(()) => razer_core::CommandResult::Applied,
                 Err(error) => {
                     eprintln!("set_fan_rpm failed: {error:?}");
-                    razer_core::CommandResult::Rejected { reason: thermal_error_reason(&error) }
+                    razer_core::CommandResult::Rejected {
+                        reason: thermal_error_reason(&error),
+                    }
                 }
             };
         }
-        razer_core::CommandResult::Rejected { reason: "no supported device present".to_string() }
+        razer_core::CommandResult::Rejected {
+            reason: "no supported device present".to_string(),
+        }
     }
 
-    pub fn set_logo_led_state(&mut self, ac:usize, logo_state: u8) -> bool {
+    pub fn set_logo_led_state(&mut self, ac: usize, logo_state: u8) -> bool {
         let mut res: bool = false;
         let mut is_synced = false;
-        
+
         if let Some(config) = self.get_config() {
             is_synced = config.sync;
             config.power[ac].logo_state = logo_state;
@@ -836,10 +929,10 @@ impl DeviceManager {
                 eprintln!("Error write config {:?}", e);
             }
         }
-             
+
         if let Some(laptop) = self.get_device() {
             let state = laptop.get_ac_state();
-           
+
             if state != ac && !is_synced {
                 res = true;
             } else {
@@ -852,11 +945,11 @@ impl DeviceManager {
 
     pub fn get_logo_led_state(&mut self, ac: usize) -> u8 {
         // if let Some(laptop) = self.get_device() {
-            // if laptop.ac_state as usize == ac {
-                // return laptop.get_logo_led_state();
-            // }
+        // if laptop.ac_state as usize == ac {
+        // return laptop.get_logo_led_state();
         // }
-    
+        // }
+
         if let Some(config) = self.get_ac_config(ac) {
             return config.logo_state;
         }
@@ -864,12 +957,16 @@ impl DeviceManager {
         0
     }
 
-    pub fn set_brightness(&mut self, ac:usize, brightness: u8) -> bool {
+    pub fn set_brightness(&mut self, ac: usize, brightness: u8) -> bool {
         let mut res: bool = false;
-        let clamped = if brightness > 100 { 100u16 } else { brightness as u16 };
+        let clamped = if brightness > 100 {
+            100u16
+        } else {
+            brightness as u16
+        };
         let _val = clamped * 255 / 100;
         let mut is_synced = false;
-        
+
         if let Some(config) = self.get_config() {
             is_synced = config.sync;
             config.power[ac].brightness = _val as u8;
@@ -881,7 +978,7 @@ impl DeviceManager {
                 eprintln!("Error write config {:?}", e);
             }
         }
- 
+
         if let Some(laptop) = self.get_device() {
             let state = laptop.get_ac_state();
             // If sync is enabled, the new brightness applies to both states, so update hardware regardless
@@ -898,7 +995,7 @@ impl DeviceManager {
     pub fn get_brightness(&mut self, ac: usize) -> u8 {
         if let Some(config) = self.get_ac_config(ac) {
             let val = config.brightness as u32;
-            let mut perc = val * 100 * 100/ 255;
+            let mut perc = val * 100 * 100 / 255;
             perc += 50;
             perc /= 100;
             return perc as u8;
@@ -1022,7 +1119,7 @@ impl DeviceManager {
         0
     }
 
-    pub fn get_power_mode(&mut self, ac:usize) -> u8 {
+    pub fn get_power_mode(&mut self, ac: usize) -> u8 {
         if let Some(config) = self.get_ac_config(ac) {
             return config.power_mode;
         }
@@ -1030,7 +1127,7 @@ impl DeviceManager {
         0
     }
 
-    pub fn get_cpu_boost(&mut self, ac:usize) -> u8 {
+    pub fn get_cpu_boost(&mut self, ac: usize) -> u8 {
         if let Some(config) = self.get_ac_config(ac) {
             return config.cpu_boost;
         }
@@ -1038,7 +1135,7 @@ impl DeviceManager {
         0
     }
 
-    pub fn get_gpu_boost(&mut self, ac:usize) -> u8 {
+    pub fn get_gpu_boost(&mut self, ac: usize) -> u8 {
         if let Some(config) = self.get_ac_config(ac) {
             return config.gpu_boost;
         }
@@ -1054,9 +1151,10 @@ impl DeviceManager {
         let config: Option<config::PowerConfig> = self.get_ac_config(ac as usize);
         if let Some(config) = config
             && let Some(laptop) = self.get_device()
-                && let Err(error) = laptop.set_config(config) {
-                    eprintln!("set_ac_state: apply config failed: {error:?}");
-                }
+            && let Err(error) = laptop.set_config(config)
+        {
+            eprintln!("set_ac_state: apply config failed: {error:?}");
+        }
     }
 
     pub fn set_ac_state_get(&mut self) {
@@ -1067,7 +1165,11 @@ impl DeviceManager {
                 return;
             }
         };
-        let proxy_ac = dbus_system.with_proxy("org.freedesktop.UPower", "/org/freedesktop/UPower/devices/line_power_AC0", time::Duration::from_millis(5000));
+        let proxy_ac = dbus_system.with_proxy(
+            "org.freedesktop.UPower",
+            "/org/freedesktop/UPower/devices/line_power_AC0",
+            time::Duration::from_millis(5000),
+        );
         use battery::OrgFreedesktopUPowerDevice;
         if let Ok(online) = proxy_ac.online() {
             if let Some(laptop) = self.get_device() {
@@ -1081,14 +1183,16 @@ impl DeviceManager {
                     online, config.power_mode, config.cpu_boost, config.gpu_boost
                 );
                 if let Some(laptop) = self.get_device()
-                    && let Err(error) = laptop.set_config(config) {
-                        eprintln!("set_ac_state_get: apply config failed: {error:?}");
-                    }
+                    && let Err(error) = laptop.set_config(config)
+                {
+                    eprintln!("set_ac_state_get: apply config failed: {error:?}");
+                }
             }
         } else {
-            eprintln!("set_ac_state_get: UPower online() read failed; no profile applied this pass");
+            eprintln!(
+                "set_ac_state_get: UPower online() read failed; no profile applied this pass"
+            );
         }
-
     }
 
     /// Set the active AC-state index without applying the saved profile. Used on
@@ -1154,7 +1258,8 @@ impl DeviceManager {
     /// Whether the discovered device is the Blade 16 2025, which alone runs the
     /// verified thermal application and tachometer monitor.
     pub fn is_blade_16_2025(&mut self) -> bool {
-        self.get_device().is_some_and(|laptop| laptop.pid() == thermal::BLADE_16_2025_PID)
+        self.get_device()
+            .is_some_and(|laptop| laptop.pid() == thermal::BLADE_16_2025_PID)
     }
 
     pub fn get_device(&mut self) -> Option<&mut RazerLaptop> {
@@ -1162,22 +1267,23 @@ impl DeviceManager {
     }
 
     pub fn set_bho_handler(&mut self, is_on: bool, threshold: u8) -> bool {
-        let result = self.get_device()
+        let result = self
+            .get_device()
             .is_some_and(|laptop| laptop.set_bho(is_on, threshold));
-        if result
-            && let Some(config) = self.get_config() {
-                config.bho_on = is_on;
-                config.bho_threshold = threshold;
-                if let Err(e) = config.write_to_file() {
-                    eprintln!("Error write config {:?}", e);
-                }
+        if result && let Some(config) = self.get_config() {
+            config.bho_on = is_on;
+            config.bho_threshold = threshold;
+            if let Err(e) = config.write_to_file() {
+                eprintln!("Error write config {:?}", e);
             }
+        }
         result
     }
 
     pub fn get_bho_handler(&mut self) -> Option<(bool, u8)> {
         // Check if device supports BHO
-        let has_bho = self.get_device()
+        let has_bho = self
+            .get_device()
             .is_some_and(|laptop| laptop.have_feature("bho".to_string()));
         if !has_bho {
             return None;
@@ -1195,18 +1301,17 @@ impl DeviceManager {
                 None => return,
             }
         };
-        if bho_on
-            && let Some(laptop) = self.get_device() {
-                laptop.set_bho(bho_on, bho_threshold);
-            }
+        if bho_on && let Some(laptop) = self.get_device() {
+            laptop.set_bho(bho_on, bho_threshold);
+        }
     }
 
-    fn get_config(&mut  self) -> Option<&mut config::Configuration> {
+    fn get_config(&mut self) -> Option<&mut config::Configuration> {
         self.config.as_mut()
     }
 
     // pub fn set_device(&mut self, device: RazerLaptop) {
-        // self.device = Some(device);
+    // self.device = Some(device);
     // }
 
     pub fn find_supported_device(&mut self, vid: u16, pid: u16) -> Option<&SupportedDevice> {
@@ -1223,7 +1328,7 @@ impl DeviceManager {
         None
     }
 
-    pub fn discover_devices(&mut self)  {
+    pub fn discover_devices(&mut self) {
         // Check if socket is OK
         match HidApi::new() {
             Ok(api) => {
@@ -1231,7 +1336,10 @@ impl DeviceManager {
                 // hidapi's linux-native (hidraw) backend returns -1 for
                 // interface_number(), so resolve the real USB interface
                 // number from sysfs when the value is unavailable.
-                for device in api.device_list().filter(|d| d.vendor_id() == RAZER_VENDOR_ID) {
+                for device in api
+                    .device_list()
+                    .filter(|d| d.vendor_id() == RAZER_VENDOR_ID)
+                {
                     let iface = if device.interface_number() >= 0 {
                         device.interface_number()
                     } else {
@@ -1244,7 +1352,9 @@ impl DeviceManager {
                         continue;
                     }
 
-                    if let Some(supported_device) = self.find_supported_device(device.vendor_id(), device.product_id()) {
+                    if let Some(supported_device) =
+                        self.find_supported_device(device.vendor_id(), device.product_id())
+                    {
                         match api.open_path(device.path()) {
                             Ok(dev) => {
                                 self.device = Some(RazerLaptop::new(
@@ -1291,7 +1401,10 @@ impl DeviceManager {
                         }
 
                         let iface = Self::hidraw_iface_number(&name).unwrap_or(999);
-                        eprintln!("hidraw fallback candidate: /dev/{} vid={:04x} pid={:04x} iface={}", name, vid, pid, iface);
+                        eprintln!(
+                            "hidraw fallback candidate: /dev/{} vid={:04x} pid={:04x} iface={}",
+                            name, vid, pid, iface
+                        );
                         candidates.push((name, vid, pid, iface));
                     }
                 }
@@ -1306,11 +1419,7 @@ impl DeviceManager {
                         };
                         eprintln!(
                             "Trying hidraw fallback open for {} ({:04x}:{:04x}) on {} (iface {})",
-                            supported_device.name,
-                            vid,
-                            pid,
-                            path,
-                            iface,
+                            supported_device.name, vid, pid, path, iface,
                         );
                         match api.open_path(c_path.as_c_str()) {
                             Ok(dev) => {
@@ -1326,11 +1435,7 @@ impl DeviceManager {
                             Err(e) => {
                                 eprintln!(
                                     "hidraw fallback open failed for {} ({:04x}:{:04x}) on {}: {}",
-                                    supported_device.name,
-                                    vid,
-                                    pid,
-                                    path,
-                                    e
+                                    supported_device.name, vid, pid, path, e
                                 );
                             }
                         }
@@ -1338,10 +1443,10 @@ impl DeviceManager {
                 }
 
                 eprintln!("No supported Razer HID device could be opened");
-            },
+            }
             Err(e) => {
                 eprintln!("Error: {}", e);
-            },
+            }
         }
     }
 }
@@ -1352,8 +1457,8 @@ pub struct RazerLaptop {
     fan: Vec<u16>,
     pid: u16,
     device: hidapi::HidDevice,
-    power: u8, // need for fan
-    fan_rpm: u8, // need for power
+    power: u8,    // need for fan
+    fan_rpm: u8,  // need for power
     ac_state: u8, // index config array
     screensaver: bool,
     transaction_id: u8,
@@ -1367,23 +1472,23 @@ pub struct RazerLaptop {
 }
 //
 impl RazerLaptop {
-// LED STORAGE Options
-    const NOSTORE:u8 = 0x00;
-    const VARSTORE:u8 = 0x01;
-// LED definitions
-    const LOGO_LED:u8 = 0x04;
-    const BACKLIGHT_LED:u8 = 0x05;
-// effects
-    pub const OFF:u8 = 0x00;
-    pub const WAVE:u8 = 0x01;
-    pub const REACTIVE:u8 = 0x02; // Afterglo
+    // LED STORAGE Options
+    const NOSTORE: u8 = 0x00;
+    const VARSTORE: u8 = 0x01;
+    // LED definitions
+    const LOGO_LED: u8 = 0x04;
+    const BACKLIGHT_LED: u8 = 0x05;
+    // effects
+    pub const OFF: u8 = 0x00;
+    pub const WAVE: u8 = 0x01;
+    pub const REACTIVE: u8 = 0x02; // Afterglo
     #[allow(dead_code)]
-    pub const BREATHING:u8 = 0x03;
-    pub const SPECTRUM:u8 = 0x04;
-    pub const CUSTOMFRAME:u8 = 0x05;
-    pub const STATIC:u8 = 0x06;
+    pub const BREATHING: u8 = 0x03;
+    pub const SPECTRUM: u8 = 0x04;
+    pub const CUSTOMFRAME: u8 = 0x05;
+    pub const STATIC: u8 = 0x06;
     #[allow(dead_code)]
-    pub const STARLIGHT:u8 = 0x19;
+    pub const STARLIGHT: u8 = 0x19;
 
     // Command-confirm tuning, mirroring Synapse's UsbRzDeviceAction handshake:
     // write the report, then re-read the reply until the EC reports SUCCESS. The
@@ -1395,8 +1500,14 @@ impl RazerLaptop {
     const SEND_READ_POLLS: usize = 20;
     const SEND_POLL_INTERVAL_MS: u64 = 5;
 
-    pub fn new(name: String, features: Vec<String>, fan: Vec<u16>, pid: u16, device: hidapi::HidDevice) -> RazerLaptop {
-        RazerLaptop{
+    pub fn new(
+        name: String,
+        features: Vec<String>,
+        fan: Vec<u16>,
+        pid: u16,
+        device: hidapi::HidDevice,
+    ) -> RazerLaptop {
+        RazerLaptop {
             name,
             features,
             fan,
@@ -1486,7 +1597,7 @@ impl RazerLaptop {
         (rpm / 100) as u8
     }
 
-    fn clamp_u8(&mut self, value: u8, min: u8, max: u8) ->u8 {
+    fn clamp_u8(&mut self, value: u8, min: u8, max: u8) -> u8 {
         if value > max {
             return max;
         }
@@ -1594,7 +1705,7 @@ impl RazerLaptop {
         report.args[2] = self.power;
         match self.fan_rpm {
             0 => report.args[3] = 0x00,
-            _ => report.args[3] = 0x01
+            _ => report.args[3] = 0x01,
         }
         self.send_report(report)?;
         Ok(())
@@ -1652,7 +1763,12 @@ impl RazerLaptop {
     /// Apply a performance mode (and, in Custom, per-zone boost). The Blade 16
     /// 2025 goes through the verified profile-1 sequence; other models keep the
     /// legacy profile-0 boost path unchanged.
-    pub fn set_power_mode(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), ThermalError> {
+    pub fn set_power_mode(
+        &mut self,
+        mode: u8,
+        cpu_boost: u8,
+        gpu_boost: u8,
+    ) -> Result<(), ThermalError> {
         if self.pid == thermal::BLADE_16_2025_PID {
             if self.thermal_safety.writes_disabled() {
                 return Err(ThermalError::WritesDisabled);
@@ -1662,13 +1778,18 @@ impl RazerLaptop {
         Ok(self.set_power_mode_legacy(mode, cpu_boost, gpu_boost)?)
     }
 
-    fn set_power_mode_legacy(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), TransportError> {
+    fn set_power_mode_legacy(
+        &mut self,
+        mode: u8,
+        cpu_boost: u8,
+        gpu_boost: u8,
+    ) -> Result<(), TransportError> {
         if mode <= 3 {
             self.power = mode;
             self.set_power(0x01)?;
             self.set_power(0x02)?;
         } else if mode == 4 {
-            self.power =  mode;
+            self.power = mode;
             self.fan_rpm = 0;
             self.get_power_mode(0x01)?;
             self.set_power(0x01)?;
@@ -1686,7 +1807,12 @@ impl RazerLaptop {
     /// Verified power/boost application (Blade 16 2025). The whole sequence gets
     /// exactly one bounded second attempt: on a first failure it is retried once,
     /// after which the failure stands.
-    fn apply_power_verified(&mut self, mode: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), ThermalError> {
+    fn apply_power_verified(
+        &mut self,
+        mode: u8,
+        cpu_boost: u8,
+        gpu_boost: u8,
+    ) -> Result<(), ThermalError> {
         match self.apply_power_once(mode, cpu_boost, gpu_boost) {
             Ok(()) => Ok(()),
             Err(first) => {
@@ -1696,16 +1822,26 @@ impl RazerLaptop {
         }
     }
 
-    fn apply_power_once(&mut self, mode_byte: u8, cpu_boost: u8, gpu_boost: u8) -> Result<(), ThermalError> {
+    fn apply_power_once(
+        &mut self,
+        mode_byte: u8,
+        cpu_boost: u8,
+        gpu_boost: u8,
+    ) -> Result<(), ThermalError> {
         let mode: thermal::PerformanceMode = thermal::PerformanceMode::try_from(mode_byte)?;
         let source: thermal::PowerSource = self.current_power_source();
         if !thermal::is_mode_selectable(source, mode) {
-            return Err(ThermalError::Policy(thermal::ThermalPolicyError::ModeNotSelectable { mode, source }));
+            return Err(ThermalError::Policy(
+                thermal::ThermalPolicyError::ModeNotSelectable { mode, source },
+            ));
         }
         // Validate the custom levels before any 0x02 mode write, so a rejected
         // level never latches Custom on the EC and strands stale boost levels.
         let custom_levels: Option<(u8, u8)> = if mode == thermal::PerformanceMode::Custom {
-            Some((thermal::validate_custom_level(cpu_boost)?, thermal::validate_custom_level(gpu_boost)?))
+            Some((
+                thermal::validate_custom_level(cpu_boost)?,
+                thermal::validate_custom_level(gpu_boost)?,
+            ))
         } else {
             None
         };
@@ -1728,10 +1864,16 @@ impl RazerLaptop {
             }
         }
         if let Some((cpu_level, gpu_level)) = custom_levels {
-            for (fan, level) in [(thermal::FanId::Cpu, cpu_level), (thermal::FanId::Gpu, gpu_level)] {
+            for (fan, level) in [
+                (thermal::FanId::Cpu, cpu_level),
+                (thermal::FanId::Gpu, gpu_level),
+            ] {
                 self.send_thermal(&thermal::set_boost(fan, level))?;
             }
-            for (fan, level) in [(thermal::FanId::Cpu, cpu_level), (thermal::FanId::Gpu, gpu_level)] {
+            for (fan, level) in [
+                (thermal::FanId::Cpu, cpu_level),
+                (thermal::FanId::Gpu, gpu_level),
+            ] {
                 let reply: [u8; 80] = self.send_thermal(&thermal::get_boost(fan))?;
                 let observed: u8 = thermal::decode_boost(fan, &reply)?;
                 if observed != level {
@@ -1807,7 +1949,10 @@ impl RazerLaptop {
                     self.send_thermal(&thermal::set_fan_mode(fan, mode, true))?;
                 }
                 for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
-                    self.send_thermal(&thermal::set_fan_speed(fan, thermal::FanRpm(commanded_rpm)))?;
+                    self.send_thermal(&thermal::set_fan_speed(
+                        fan,
+                        thermal::FanRpm(commanded_rpm),
+                    ))?;
                 }
                 for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
                     let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_speed(fan))?;
@@ -1839,9 +1984,10 @@ impl RazerLaptop {
     /// restart its settle window on a fresh re-apply of the same value.
     pub fn thermal_manual_watch(&self) -> Option<thermal::ManualWatch> {
         match self.thermal_safety {
-            thermal::ThermalSafetyState::Manual { target, .. } => {
-                Some(thermal::ManualWatch { target, generation: self.fan_apply_generation })
-            }
+            thermal::ThermalSafetyState::Manual { target, .. } => Some(thermal::ManualWatch {
+                target,
+                generation: self.fan_apply_generation,
+            }),
             _ => None,
         }
     }
@@ -1861,7 +2007,8 @@ impl RazerLaptop {
         if let thermal::VerificationEvent::Failed(failure) = event {
             eprintln!("thermal verification cycle failed: {failure:?}");
         }
-        let transition: thermal::SafetyTransition = thermal::advance_safety(self.thermal_safety, event);
+        let transition: thermal::SafetyTransition =
+            thermal::advance_safety(self.thermal_safety, event);
         self.thermal_safety = transition.state;
         if transition.action == Some(thermal::SafetyAction::FailbackBothFans) {
             let report: thermal::FailbackReport = self.failback_both_fans();
@@ -1880,8 +2027,11 @@ impl RazerLaptop {
         for fan in [thermal::FanId::Cpu, thermal::FanId::Gpu] {
             match self.read_current_fan_rpm(fan) {
                 Ok(reading) => {
-                    match thermal::classify_manual_reading(target, reading.0, ramp_deadline_exceeded)
-                    {
+                    match thermal::classify_manual_reading(
+                        target,
+                        reading.0,
+                        ramp_deadline_exceeded,
+                    ) {
                         thermal::VerificationEvent::Succeeded => continue,
                         failed => return failed,
                     }
@@ -1901,7 +2051,10 @@ impl RazerLaptop {
     fn failback_both_fans(&mut self) -> thermal::FailbackReport {
         let cpu: Result<(), ThermalError> = self.failback_zone(thermal::FanId::Cpu);
         let gpu: Result<(), ThermalError> = self.failback_zone(thermal::FanId::Gpu);
-        thermal::FailbackReport { cpu: zone_outcome(cpu), gpu: zone_outcome(gpu) }
+        thermal::FailbackReport {
+            cpu: zone_outcome(cpu),
+            gpu: zone_outcome(gpu),
+        }
     }
 
     fn failback_zone(&mut self, fan: thermal::FanId) -> Result<(), ThermalError> {
@@ -1935,9 +2088,10 @@ impl RazerLaptop {
             }
         }
         if mode == thermal::PerformanceMode::Custom {
-            for (fan, level) in
-                [(thermal::FanId::Cpu, expected_cpu), (thermal::FanId::Gpu, expected_gpu)]
-            {
+            for (fan, level) in [
+                (thermal::FanId::Cpu, expected_cpu),
+                (thermal::FanId::Gpu, expected_gpu),
+            ] {
                 let reply: [u8; 80] = self.send_thermal(&thermal::get_boost(fan))?;
                 if thermal::decode_boost(fan, &reply)? != level {
                     return Ok(thermal::WakeVerifyOutcome::StateReset);
@@ -1945,7 +2099,8 @@ impl RazerLaptop {
             }
         }
         if expected_fan_hundreds != 0 {
-            let reply: [u8; 80] = self.send_thermal(&thermal::get_fan_speed(thermal::FanId::Cpu))?;
+            let reply: [u8; 80] =
+                self.send_thermal(&thermal::get_fan_speed(thermal::FanId::Cpu))?;
             let observed: u16 = thermal::decode_fan_setpoint(thermal::FanId::Cpu, &reply)?;
             if observed != u16::from(expected_fan_hundreds) * 100 {
                 return Ok(thermal::WakeVerifyOutcome::StateReset);
@@ -1990,7 +2145,7 @@ impl RazerLaptop {
     }
 
     fn set_rpm(&mut self, zone: u8) -> Result<(), TransportError> {
-        let mut report:RazerPacket = RazerPacket::new(0x0d, 0x01, 0x03);
+        let mut report: RazerPacket = RazerPacket::new(0x0d, 0x01, 0x03);
         // Set fan RPM. profileId=1 matches Synapse's classId (Set Thermal Fan Speed).
         report.args[0] = 0x01;
         report.args[1] = zone;
@@ -2008,7 +2163,10 @@ impl RazerLaptop {
     /// Read a zone's current tachometer RPM via the profile-1 0x88 builder,
     /// validating the reply's identity. A transport or decode failure is returned
     /// as a typed error, never converted into a zero or default reading.
-    pub fn read_current_fan_rpm(&mut self, fan: thermal::FanId) -> Result<thermal::FanRpm, ThermalError> {
+    pub fn read_current_fan_rpm(
+        &mut self,
+        fan: thermal::FanId,
+    ) -> Result<thermal::FanRpm, ThermalError> {
         let reply: [u8; 80] = self.send_thermal(&thermal::get_current_fan_rpm(fan))?;
         let rpm: u16 = thermal::decode_fan_rpm(fan, &reply)?;
         Ok(thermal::FanRpm(rpm))
@@ -2049,7 +2207,7 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x03, 0x82, 0x03);
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::LOGO_LED;
-        if let Some(response) = self.send_report_logging(report){
+        if let Some(response) = self.send_report_logging(report) {
             return response.args[2];
         }
         0
@@ -2073,7 +2231,7 @@ impl RazerLaptop {
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::BACKLIGHT_LED;
         report.args[2] = 0x00;
-        if let Some(response) = self.send_report_logging(report){
+        if let Some(response) = self.send_report_logging(report) {
             return response.args[2];
         }
         0
@@ -2088,8 +2246,7 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x07, 0x92, 0x01);
         report.args[0] = 0x00;
 
-        self.send_report_logging(report)
-            .map(|resp| resp.args[0])
+        self.send_report_logging(report).map(|resp| resp.args[0])
     }
 
     pub fn set_bho(&mut self, is_on: bool, threshold: u8) -> bool {
@@ -2100,12 +2257,10 @@ impl RazerLaptop {
         let mut report = RazerPacket::new(0x07, 0x12, 0x01);
         report.args[0] = bho_to_byte(is_on, threshold);
 
-        self.send_report_logging(report)
-            .is_some_and(|r| {
-                println!("Response Packet:\n{:#?}", r); 
-                true
-            } 
-        )
+        self.send_report_logging(report).is_some_and(|r| {
+            println!("Response Packet:\n{:#?}", r);
+            true
+        })
     }
 
     fn next_transaction_id(&mut self) -> u8 {
@@ -2282,7 +2437,6 @@ impl RazerLaptop {
             attempts: Self::SEND_WRITE_ATTEMPTS,
         }))
     }
-
 }
 
 /// How `send_report` should react to a feature-report reply, mirroring Synapse's
@@ -2379,7 +2533,9 @@ mod tests {
             validate_fan_request(thermal::PerformanceMode::Balanced.wire_value(), 68936),
             Err(thermal::ThermalPolicyError::RpmOutOfRange { .. })
         ));
-        assert!(validate_fan_request(thermal::PerformanceMode::Balanced.wire_value(), 3400).is_ok());
+        assert!(
+            validate_fan_request(thermal::PerformanceMode::Balanced.wire_value(), 3400).is_ok()
+        );
     }
 
     #[test]
@@ -2413,7 +2569,10 @@ mod tests {
     fn accepts_matching_success() {
         let request = RazerPacket::new(0x0d, 0x02, 0x04);
         let response = reply(0x0d, 0x02, RazerPacket::RAZER_CMD_SUCCESSFUL);
-        assert_eq!(classify_response(&request, &response), ResponseAction::Accept);
+        assert_eq!(
+            classify_response(&request, &response),
+            ResponseAction::Accept
+        );
     }
 
     #[test]
@@ -2425,7 +2584,10 @@ mod tests {
         let request = RazerPacket::new(0x0d, 0x80, 0x50);
         let mut response = reply(0x0d, 0x80, RazerPacket::RAZER_CMD_SUCCESSFUL);
         response.remaining_packets = 0x0003;
-        assert_eq!(classify_response(&request, &response), ResponseAction::Accept);
+        assert_eq!(
+            classify_response(&request, &response),
+            ResponseAction::Accept
+        );
     }
 
     #[test]
@@ -2459,7 +2621,10 @@ mod tests {
     fn resends_on_failure() {
         let request = RazerPacket::new(0x0d, 0x02, 0x04);
         let response = reply(0x0d, 0x02, RazerPacket::RAZER_CMD_FAILURE);
-        assert_eq!(classify_response(&request, &response), ResponseAction::Resend);
+        assert_eq!(
+            classify_response(&request, &response),
+            ResponseAction::Resend
+        );
     }
 
     #[test]
@@ -2476,7 +2641,10 @@ mod tests {
     fn accepts_bho_reply_for_bho_request() {
         let request = RazerPacket::new(0x07, 0x92, 0x01);
         let response = reply(0x07, 0x92, RazerPacket::RAZER_CMD_SUCCESSFUL);
-        assert_eq!(classify_response(&request, &response), ResponseAction::Accept);
+        assert_eq!(
+            classify_response(&request, &response),
+            ResponseAction::Accept
+        );
     }
 
     #[test]

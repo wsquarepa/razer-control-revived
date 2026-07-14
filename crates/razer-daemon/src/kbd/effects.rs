@@ -77,8 +77,12 @@ impl Effect for StaticGradient {
     {
         let mut kbd = board::KeyboardData::new();
         let args: [u8; 6] = [
-            *args.get(0).unwrap_or(&0), *args.get(1).unwrap_or(&0), *args.get(2).unwrap_or(&0),
-            *args.get(3).unwrap_or(&0), *args.get(4).unwrap_or(&0), *args.get(5).unwrap_or(&0),
+            *args.get(0).unwrap_or(&0),
+            *args.get(1).unwrap_or(&0),
+            *args.get(2).unwrap_or(&0),
+            *args.get(3).unwrap_or(&0),
+            *args.get(4).unwrap_or(&0),
+            *args.get(5).unwrap_or(&0),
         ];
         let mut c1 = board::AnimatorKeyColour::new_u(args[0], args[1], args[2]);
         let c2 = board::AnimatorKeyColour::new_u(args[3], args[4], args[5]);
@@ -139,8 +143,12 @@ impl Effect for WaveGradient {
         Self: Sized,
     {
         let args: [u8; 6] = [
-            *args.get(0).unwrap_or(&0), *args.get(1).unwrap_or(&0), *args.get(2).unwrap_or(&0),
-            *args.get(3).unwrap_or(&0), *args.get(4).unwrap_or(&0), *args.get(5).unwrap_or(&0),
+            *args.get(0).unwrap_or(&0),
+            *args.get(1).unwrap_or(&0),
+            *args.get(2).unwrap_or(&0),
+            *args.get(3).unwrap_or(&0),
+            *args.get(4).unwrap_or(&0),
+            *args.get(5).unwrap_or(&0),
         ];
         let mut wave = WaveGradient {
             kbd: board::KeyboardData::new(),

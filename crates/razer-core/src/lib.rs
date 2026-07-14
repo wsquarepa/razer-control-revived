@@ -1,8 +1,8 @@
+use libc::umask;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
-use libc::umask;
 
 /// Razer laptop control socket path.
 /// Prefer XDG_RUNTIME_DIR (/run/user/<uid>) which persists for the session.
@@ -133,65 +133,161 @@ pub fn provisional_rpm_range(wire_mode: u8) -> (u16, u16) {
 #[derive(Serialize, Deserialize, Debug)]
 /// Represents data sent TO the daemon
 pub enum DaemonCommand {
-    SetFanSpeed { ac: usize, rpm: i32 },      // Fan speed
-    GetFanSpeed { ac: usize },                 // Get (Fan speed)
-    SetPowerMode { ac: usize, pwr: u8, cpu: u8, gpu: u8}, // Power mode
-    GetPwrLevel { ac: usize },                 // Get (Power mode)
-    GetCPUBoost { ac: usize },                 // Get (CPU boost)
-    GetGPUBoost { ac: usize },                 // Get (GPU boost)
-    SetLogoLedState{ ac:usize, logo_state: u8 },
-    GetLogoLedState { ac: usize },
-    GetKeyboardRGB { layer: i32 }, // Layer ID
-    SetEffect { name: String, params: Vec<u8> }, // Set keyboard colour
-    SetStandardEffect { name: String, params: Vec<u8> }, // Set keyboard colour
-    SetBrightness { ac:usize, val: u8 },
-    SetIdle {ac: usize, val: u32 },
-    GetBrightness { ac: usize },
-    SetSync { sync: bool },
-    GetSync (),
-    SetBatteryHealthOptimizer { is_on: bool, threshold: u8 },
-    GetBatteryHealthOptimizer (),
+    SetFanSpeed {
+        ac: usize,
+        rpm: i32,
+    }, // Fan speed
+    GetFanSpeed {
+        ac: usize,
+    }, // Get (Fan speed)
+    SetPowerMode {
+        ac: usize,
+        pwr: u8,
+        cpu: u8,
+        gpu: u8,
+    }, // Power mode
+    GetPwrLevel {
+        ac: usize,
+    }, // Get (Power mode)
+    GetCPUBoost {
+        ac: usize,
+    }, // Get (CPU boost)
+    GetGPUBoost {
+        ac: usize,
+    }, // Get (GPU boost)
+    SetLogoLedState {
+        ac: usize,
+        logo_state: u8,
+    },
+    GetLogoLedState {
+        ac: usize,
+    },
+    GetKeyboardRGB {
+        layer: i32,
+    }, // Layer ID
+    SetEffect {
+        name: String,
+        params: Vec<u8>,
+    }, // Set keyboard colour
+    SetStandardEffect {
+        name: String,
+        params: Vec<u8>,
+    }, // Set keyboard colour
+    SetBrightness {
+        ac: usize,
+        val: u8,
+    },
+    SetIdle {
+        ac: usize,
+        val: u32,
+    },
+    GetBrightness {
+        ac: usize,
+    },
+    SetSync {
+        sync: bool,
+    },
+    GetSync(),
+    SetBatteryHealthOptimizer {
+        is_on: bool,
+        threshold: u8,
+    },
+    GetBatteryHealthOptimizer(),
     GetDeviceName,
     GetThermalStatus,
     GetStandardEffect,
     GetGpuStatus,
-    SetDgpuRuntimePM { enabled: bool },
-    SetGpuMode { mode: String },
+    SetDgpuRuntimePM {
+        enabled: bool,
+    },
+    SetGpuMode {
+        mode: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 /// Represents data sent back from Daemon after it receives
 /// a command.
 pub enum DaemonResponse {
-    SetFanSpeed { result: CommandResult },           // Response
-    GetFanSpeed { rpm: i32 },                        // Get (Fan speed)
-    SetPowerMode { result: CommandResult },          // Response
-    GetPwrLevel { pwr: u8 },                         // Get (Power mode)
-    GetCPUBoost { cpu: u8 },                         // Get (CPU boost)
-    GetGPUBoost { gpu: u8 },                         // Get (GPU boost)
-    SetLogoLedState {result: bool },
-    GetLogoLedState { logo_state: u8 },
-    GetKeyboardRGB { layer: i32, rgbdata: Vec<u8> }, // Response (RGB) of 90 keys
-    SetEffect { result: bool },                       // Set keyboard colour
-    SetStandardEffect { result: bool },                       // Set keyboard colour
-    SetBrightness { result: bool },
-    SetIdle { result: bool },
-    GetBrightness { result: u8 },
-    SetSync { result: bool },
-    GetSync { sync: bool },
-    SetBatteryHealthOptimizer { result: bool },
-    GetBatteryHealthOptimizer { is_on: bool, threshold: u8 },
-    GetDeviceName { name: String },
-    GetThermalStatus { status: ThermalStatus },
-    GetStandardEffect { effect: u8, params: Vec<u8> },
+    SetFanSpeed {
+        result: CommandResult,
+    }, // Response
+    GetFanSpeed {
+        rpm: i32,
+    }, // Get (Fan speed)
+    SetPowerMode {
+        result: CommandResult,
+    }, // Response
+    GetPwrLevel {
+        pwr: u8,
+    }, // Get (Power mode)
+    GetCPUBoost {
+        cpu: u8,
+    }, // Get (CPU boost)
+    GetGPUBoost {
+        gpu: u8,
+    }, // Get (GPU boost)
+    SetLogoLedState {
+        result: bool,
+    },
+    GetLogoLedState {
+        logo_state: u8,
+    },
+    GetKeyboardRGB {
+        layer: i32,
+        rgbdata: Vec<u8>,
+    }, // Response (RGB) of 90 keys
+    SetEffect {
+        result: bool,
+    }, // Set keyboard colour
+    SetStandardEffect {
+        result: bool,
+    }, // Set keyboard colour
+    SetBrightness {
+        result: bool,
+    },
+    SetIdle {
+        result: bool,
+    },
+    GetBrightness {
+        result: u8,
+    },
+    SetSync {
+        result: bool,
+    },
+    GetSync {
+        sync: bool,
+    },
+    SetBatteryHealthOptimizer {
+        result: bool,
+    },
+    GetBatteryHealthOptimizer {
+        is_on: bool,
+        threshold: u8,
+    },
+    GetDeviceName {
+        name: String,
+    },
+    GetThermalStatus {
+        status: ThermalStatus,
+    },
+    GetStandardEffect {
+        effect: u8,
+        params: Vec<u8>,
+    },
     GetGpuStatus {
         gpus: Vec<GpuInfo>,
         dgpu_runtime_pm: bool,
         envycontrol_mode: String,
         envycontrol_available: bool,
     },
-    SetDgpuRuntimePM { result: bool },
-    SetGpuMode { result: bool, message: String },
+    SetDgpuRuntimePM {
+        result: bool,
+    },
+    SetGpuMode {
+        result: bool,
+        message: String,
+    },
 }
 
 #[allow(dead_code)]
@@ -211,7 +307,9 @@ pub fn create() -> Option<UnixListener> {
     if std::fs::metadata(&path).is_ok() {
         // Socket file exists — check if a daemon is actually listening
         if UnixStream::connect(&path).is_ok() {
-            eprintln!("UNIX Socket already exists and a daemon is responding. Is another daemon running?");
+            eprintln!(
+                "UNIX Socket already exists and a daemon is responding. Is another daemon running?"
+            );
             return None;
         }
         // Stale socket from a previous crash — remove it
@@ -345,8 +443,10 @@ mod tests {
             ThermalFailureCode::Policy,
             ThermalFailureCode::WritesDisabled,
         ] {
-            let dto: ThermalFailureDto =
-                ThermalFailureDto { code: code.clone(), message: "context".to_string() };
+            let dto: ThermalFailureDto = ThermalFailureDto {
+                code: code.clone(),
+                message: "context".to_string(),
+            };
             assert_eq!(round_trip(&dto), dto);
         }
     }
@@ -374,8 +474,9 @@ mod tests {
     fn command_result_round_trips_for_both_outcomes() {
         let applied: CommandResult = CommandResult::Applied;
         assert_eq!(round_trip(&applied), applied);
-        let rejected: CommandResult =
-            CommandResult::Rejected { reason: "mode not selectable".to_string() };
+        let rejected: CommandResult = CommandResult::Rejected {
+            reason: "mode not selectable".to_string(),
+        };
         assert_eq!(round_trip(&rejected), rejected);
     }
 

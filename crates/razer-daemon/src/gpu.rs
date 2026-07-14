@@ -183,7 +183,13 @@ pub fn get_envycontrol_mode() -> String {
 pub fn set_envycontrol_mode(mode: &str) -> (bool, String) {
     let valid_modes = ["integrated", "hybrid", "nvidia"];
     if !valid_modes.contains(&mode) {
-        return (false, format!("Invalid mode '{}'. Use: integrated, hybrid, or nvidia", mode));
+        return (
+            false,
+            format!(
+                "Invalid mode '{}'. Use: integrated, hybrid, or nvidia",
+                mode
+            ),
+        );
     }
 
     match Command::new("envycontrol").args(["-s", mode]).output() {
@@ -191,7 +197,10 @@ pub fn set_envycontrol_mode(mode: &str) -> (bool, String) {
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             if output.status.success() {
-                let msg = format!("GPU mode set to '{}'. Logout required to take effect.", mode);
+                let msg = format!(
+                    "GPU mode set to '{}'. Logout required to take effect.",
+                    mode
+                );
                 println!("{}", msg);
                 (true, msg)
             } else {
@@ -220,12 +229,13 @@ fn resolve_gpu_name(vendor: Option<&str>, device_id: Option<&str>, driver: &str)
         && let Ok(output) = Command::new("nvidia-smi")
             .args(["--query-gpu=name", "--format=csv,noheader,nounits"])
             .output()
-            && output.status.success() {
-                let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !name.is_empty() {
-                    return name;
-                }
-            }
+        && output.status.success()
+    {
+        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !name.is_empty() {
+            return name;
+        }
+    }
 
     // Try lspci for a name
     if let Some(dev_id) = device_id {
@@ -235,17 +245,18 @@ fn resolve_gpu_name(vendor: Option<&str>, device_id: Option<&str>, driver: &str)
         if let Ok(output) = Command::new("lspci")
             .args(["-d", &format!("{}:{}", vid, did), "-mm"])
             .output()
-            && output.status.success() {
-                let line = String::from_utf8_lossy(&output.stdout);
-                // lspci -mm format: Slot "Class" "Vendor" "Device" ...
-                // Extract the device name (4th quoted field)
-                let fields: Vec<&str> = line.split('"').collect();
-                if fields.len() >= 8 {
-                    let vendor_name = fields[3];
-                    let device_name = fields[5];
-                    return format!("{} {}", vendor_name, device_name);
-                }
+            && output.status.success()
+        {
+            let line = String::from_utf8_lossy(&output.stdout);
+            // lspci -mm format: Slot "Class" "Vendor" "Device" ...
+            // Extract the device name (4th quoted field)
+            let fields: Vec<&str> = line.split('"').collect();
+            if fields.len() >= 8 {
+                let vendor_name = fields[3];
+                let device_name = fields[5];
+                return format!("{} {}", vendor_name, device_name);
             }
+        }
     }
 
     // Fallback: vendor + driver

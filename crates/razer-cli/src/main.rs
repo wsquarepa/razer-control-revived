@@ -1,7 +1,11 @@
-use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
 
 #[derive(Parser)]
-#[command(version, about="razer laptop configuration for linux", name="razer-cli")]
+#[command(
+    version,
+    about = "razer laptop configuration for linux",
+    name = "razer-cli"
+)]
 struct Cli {
     #[command(subcommand)]
     args: Args,
@@ -336,12 +340,8 @@ fn main() {
             WriteAttr::Bho(BhoParams { state, threshold }) => {
                 validate_and_write_bho(threshold, state)
             }
-            WriteAttr::RuntimePm(RuntimePmParams { state }) => {
-                write_runtime_pm(state.is_on())
-            }
-            WriteAttr::GpuMode(GpuModeParams { mode }) => {
-                write_gpu_mode(&mode)
-            }
+            WriteAttr::RuntimePm(RuntimePmParams { state }) => write_runtime_pm(state.is_on()),
+            WriteAttr::GpuMode(GpuModeParams { mode }) => write_gpu_mode(&mode),
         },
         Args::Effect { effect } => match effect {
             Effect::Static(params) => send_effect(
@@ -449,7 +449,9 @@ fn read_bho() {
     send_data(razer_core::DaemonCommand::GetBatteryHealthOptimizer()).map_or_else(
         || eprintln!("Unknown error occured when getting bho"),
         |result| {
-            if let razer_core::DaemonResponse::GetBatteryHealthOptimizer { is_on, threshold } = result {
+            if let razer_core::DaemonResponse::GetBatteryHealthOptimizer { is_on, threshold } =
+                result
+            {
                 match is_on {
                     true => {
                         println!(
@@ -539,7 +541,7 @@ fn send_standard_effect(name: String, params: Vec<u8>) {
             } else {
                 eprintln!("Effect set FAIL!");
             }
-        },
+        }
         Some(_) => eprintln!("Unexpected response from daemon!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -553,7 +555,7 @@ fn send_effect(name: String, params: Vec<u8>) {
             } else {
                 eprintln!("Effect set FAIL!");
             }
-        },
+        }
         Some(_) => eprintln!("Unexpected response from daemon!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -565,7 +567,7 @@ fn send_data(opt: razer_core::DaemonCommand) -> Option<razer_core::DaemonRespons
         None => {
             eprintln!("Error. Cannot bind to socket");
             None
-        },
+        }
     }
 }
 
@@ -578,7 +580,7 @@ fn read_fan_rpm(ac: usize) {
                 _ => format!("{} RPM", rpm),
             };
             println!("Current fan setting: {}", rpm_desc);
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -586,7 +588,9 @@ fn read_fan_rpm(ac: usize) {
 
 fn read_actual_fan_rpm() {
     match send_data(razer_core::DaemonCommand::GetThermalStatus) {
-        Some(razer_core::DaemonResponse::GetThermalStatus { status }) => print_thermal_status(&status),
+        Some(razer_core::DaemonResponse::GetThermalStatus { status }) => {
+            print_thermal_status(&status)
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -604,7 +608,10 @@ fn print_thermal_status(status: &razer_core::ThermalStatus) {
         razer_core::FanControlModeDto::Fixed => "Fixed",
     };
     println!("Thermal safety: {}", safety);
-    println!("Power mode: {}", razer_core::performance_mode_display(status.performance_mode));
+    println!(
+        "Power mode: {}",
+        razer_core::performance_mode_display(status.performance_mode)
+    );
     println!("Fan mode: {}", fan_mode);
     // rpm fields are meaningful only when no error is present.
     match &status.error {
@@ -628,7 +635,7 @@ fn read_logo_mode(ac: usize) {
                 _ => "Unknown",
             };
             println!("Current logo setting: {}", logo_state_desc);
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -649,16 +656,21 @@ fn read_power_mode(ac: usize) {
     if let Some(resp) = send_data(razer_core::DaemonCommand::GetPwrLevel { ac }) {
         if let razer_core::DaemonResponse::GetPwrLevel { pwr } = resp {
             // Stable KDE-widget contract: `Name (N)` with the wire number in parens.
-            println!("Current power setting: {}", razer_core::performance_mode_display(pwr));
+            println!(
+                "Current power setting: {}",
+                razer_core::performance_mode_display(pwr)
+            );
             if pwr == 4 {
                 if let Some(resp) = send_data(razer_core::DaemonCommand::GetCPUBoost { ac })
-                    && let razer_core::DaemonResponse::GetCPUBoost { cpu } = resp {
-                        println!("Current CPU setting: {}", boost_level_label(cpu));
-                    };
+                    && let razer_core::DaemonResponse::GetCPUBoost { cpu } = resp
+                {
+                    println!("Current CPU setting: {}", boost_level_label(cpu));
+                };
                 if let Some(resp) = send_data(razer_core::DaemonCommand::GetGPUBoost { ac })
-                    && let razer_core::DaemonResponse::GetGPUBoost { gpu } = resp {
-                        println!("Current GPU setting: {}", boost_level_label(gpu));
-                    };
+                    && let razer_core::DaemonResponse::GetGPUBoost { gpu } = resp
+                {
+                    println!("Current GPU setting: {}", boost_level_label(gpu));
+                };
             }
         } else {
             eprintln!("Daemon responded with invalid data!");
@@ -690,16 +702,16 @@ fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Optio
         cpu: cm,
         gpu: gm,
     }) {
-        Some(razer_core::DaemonResponse::SetPowerMode { result }) => report_command_result(result, || read_power_mode(ac)),
+        Some(razer_core::DaemonResponse::SetPowerMode { result }) => {
+            report_command_result(result, || read_power_mode(ac))
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
-        None => {
-            Cli::command()
-                .error(
-                    ErrorKind::DisplayHelp,
-                    "An error occurred while sending the command to the daemon",
-                )
-                .exit()
-        },
+        None => Cli::command()
+            .error(
+                ErrorKind::DisplayHelp,
+                "An error occurred while sending the command to the daemon",
+            )
+            .exit(),
     }
 }
 
@@ -729,7 +741,7 @@ fn read_brightness(ac: usize) {
     match send_data(razer_core::DaemonCommand::GetBrightness { ac }) {
         Some(razer_core::DaemonResponse::GetBrightness { result }) => {
             println!("Current brightness: {}", result);
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -739,7 +751,7 @@ fn read_sync() {
     match send_data(razer_core::DaemonCommand::GetSync()) {
         Some(razer_core::DaemonResponse::GetSync { sync }) => {
             println!("Current sync: {:?}", sync);
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -754,7 +766,9 @@ fn write_brightness(ac: usize, val: u8) {
 
 fn write_fan_speed(ac: usize, x: i32) {
     match send_data(razer_core::DaemonCommand::SetFanSpeed { ac, rpm: x }) {
-        Some(razer_core::DaemonResponse::SetFanSpeed { result }) => report_command_result(result, || read_fan_rpm(ac)),
+        Some(razer_core::DaemonResponse::SetFanSpeed { result }) => {
+            report_command_result(result, || read_fan_rpm(ac))
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown error!"),
     }
@@ -776,19 +790,38 @@ fn write_sync(sync: bool) {
 
 fn read_gpu_status() {
     match send_data(razer_core::DaemonCommand::GetGpuStatus) {
-        Some(razer_core::DaemonResponse::GetGpuStatus { gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available }) => {
+        Some(razer_core::DaemonResponse::GetGpuStatus {
+            gpus,
+            dgpu_runtime_pm,
+            envycontrol_mode,
+            envycontrol_available,
+        }) => {
             println!("Detected GPUs:");
             for gpu in &gpus {
-                let type_label = if gpu.gpu_type == "dgpu" { "dGPU" } else { "iGPU" };
-                println!("  {} [{}] {} (driver: {}, status: {})", type_label, gpu.pci_slot, gpu.name, gpu.driver, gpu.runtime_status);
+                let type_label = if gpu.gpu_type == "dgpu" {
+                    "dGPU"
+                } else {
+                    "iGPU"
+                };
+                println!(
+                    "  {} [{}] {} (driver: {}, status: {})",
+                    type_label, gpu.pci_slot, gpu.name, gpu.driver, gpu.runtime_status
+                );
             }
-            println!("dGPU Runtime PM: {}", if dgpu_runtime_pm { "auto (power saving)" } else { "on (always active)" });
+            println!(
+                "dGPU Runtime PM: {}",
+                if dgpu_runtime_pm {
+                    "auto (power saving)"
+                } else {
+                    "on (always active)"
+                }
+            );
             if envycontrol_available {
                 println!("envycontrol mode: {}", envycontrol_mode);
             } else {
                 println!("envycontrol: not installed");
             }
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
@@ -798,27 +831,35 @@ fn write_runtime_pm(enabled: bool) {
     match send_data(razer_core::DaemonCommand::SetDgpuRuntimePM { enabled }) {
         Some(razer_core::DaemonResponse::SetDgpuRuntimePM { result }) => {
             if result {
-                println!("dGPU runtime PM set to {}", if enabled { "auto (power saving)" } else { "on (always active)" });
+                println!(
+                    "dGPU runtime PM set to {}",
+                    if enabled {
+                        "auto (power saving)"
+                    } else {
+                        "on (always active)"
+                    }
+                );
             } else {
                 eprintln!("Failed to set dGPU runtime PM (permission denied?)");
             }
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
 }
 
 fn write_gpu_mode(mode: &str) {
-    match send_data(razer_core::DaemonCommand::SetGpuMode { mode: mode.to_string() }) {
+    match send_data(razer_core::DaemonCommand::SetGpuMode {
+        mode: mode.to_string(),
+    }) {
         Some(razer_core::DaemonResponse::SetGpuMode { result, message }) => {
             if result {
                 println!("{}", message);
             } else {
                 eprintln!("Failed: {}", message);
             }
-        },
+        }
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
 }
-

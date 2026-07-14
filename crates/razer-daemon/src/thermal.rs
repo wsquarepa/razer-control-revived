@@ -108,22 +108,40 @@ pub struct RpmRange {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalPolicyError {
-    UnknownMode { wire_value: u8 },
-    ModeNotSelectable { mode: PerformanceMode, source: PowerSource },
-    RpmOutOfRange { mode: PerformanceMode, requested_rpm: i32, range: RpmRange },
-    LevelOutOfRange { level: u8 },
+    UnknownMode {
+        wire_value: u8,
+    },
+    ModeNotSelectable {
+        mode: PerformanceMode,
+        source: PowerSource,
+    },
+    RpmOutOfRange {
+        mode: PerformanceMode,
+        requested_rpm: i32,
+        range: RpmRange,
+    },
+    LevelOutOfRange {
+        level: u8,
+    },
 }
 
 impl std::fmt::Display for ThermalPolicyError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ThermalPolicyError::UnknownMode { wire_value } => {
-                write!(formatter, "unknown performance-mode wire value {wire_value}")
+                write!(
+                    formatter,
+                    "unknown performance-mode wire value {wire_value}"
+                )
             }
             ThermalPolicyError::ModeNotSelectable { mode, source } => {
                 write!(formatter, "mode {mode:?} is not selectable on {source:?}")
             }
-            ThermalPolicyError::RpmOutOfRange { mode, requested_rpm, range } => {
+            ThermalPolicyError::RpmOutOfRange {
+                mode,
+                requested_rpm,
+                range,
+            } => {
                 write!(
                     formatter,
                     "requested {requested_rpm} RPM is outside {}..={} for mode {mode:?}",
@@ -131,7 +149,10 @@ impl std::fmt::Display for ThermalPolicyError {
                 )
             }
             ThermalPolicyError::LevelOutOfRange { level } => {
-                write!(formatter, "custom level {level} is not a recognized level (0-3)")
+                write!(
+                    formatter,
+                    "custom level {level} is not a recognized level (0-3)"
+                )
             }
         }
     }
@@ -145,8 +166,10 @@ const AC_SELECTABLE_MODES: [PerformanceMode; 5] = [
     PerformanceMode::Hyperboost,
 ];
 
-const BATTERY_SELECTABLE_MODES: [PerformanceMode; 2] =
-    [PerformanceMode::BalancedBattery, PerformanceMode::BatterySaver];
+const BATTERY_SELECTABLE_MODES: [PerformanceMode; 2] = [
+    PerformanceMode::BalancedBattery,
+    PerformanceMode::BatterySaver,
+];
 
 /// The Balanced slot for a power domain: the EC partitions Balanced into wire 0
 /// (AC) and wire 6 (battery), so "default to Balanced" must pick per source.
@@ -177,13 +200,23 @@ pub fn is_mode_selectable(source: PowerSource, mode: PerformanceMode) -> bool {
 pub const fn provisional_rpm_range(mode: PerformanceMode) -> RpmRange {
     match mode {
         PerformanceMode::Balanced | PerformanceMode::BalancedBattery | PerformanceMode::Silent => {
-            RpmRange { min: 3400, max: 5200 }
+            RpmRange {
+                min: 3400,
+                max: 5200,
+            }
         }
-        PerformanceMode::MaximumPerformance | PerformanceMode::BatterySaver => {
-            RpmRange { min: 3300, max: 5400 }
-        }
-        PerformanceMode::Custom => RpmRange { min: 4000, max: 5300 },
-        PerformanceMode::Hyperboost => RpmRange { min: 3700, max: 5300 },
+        PerformanceMode::MaximumPerformance | PerformanceMode::BatterySaver => RpmRange {
+            min: 3300,
+            max: 5400,
+        },
+        PerformanceMode::Custom => RpmRange {
+            min: 4000,
+            max: 5300,
+        },
+        PerformanceMode::Hyperboost => RpmRange {
+            min: 3700,
+            max: 5300,
+        },
     }
 }
 
@@ -205,7 +238,11 @@ pub fn validate_fixed_rpm(
     }
     let range: RpmRange = provisional_rpm_range(mode);
     if requested_rpm < i32::from(range.min) || requested_rpm > i32::from(range.max) {
-        return Err(ThermalPolicyError::RpmOutOfRange { mode, requested_rpm, range });
+        return Err(ThermalPolicyError::RpmOutOfRange {
+            mode,
+            requested_rpm,
+            range,
+        });
     }
     Ok(Some(FanRpm(requested_rpm as u16)))
 }
@@ -249,7 +286,11 @@ const THERMAL_PROFILE: u8 = 1;
 /// Build the 0x80 Get Thermal Fan ID List request. Request data size 80 mirrors
 /// Synapse's variable-length list read (request tuple `[80, 13, 128]`).
 pub fn get_fan_ids() -> ThermalCommand {
-    ThermalCommand { command_id: 0x80, data_size: 80, args: [0u8; 80] }
+    ThermalCommand {
+        command_id: 0x80,
+        data_size: 80,
+        args: [0u8; 80],
+    }
 }
 
 /// Build the 0x01 Set Thermal Fan Speed request: `[profile=1, fan_id, rpm/100]`.
@@ -258,7 +299,11 @@ pub fn set_fan_speed(fan: FanId, rpm: FanRpm) -> ThermalCommand {
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
     args[2] = (rpm.0 / 100) as u8;
-    ThermalCommand { command_id: 0x01, data_size: 3, args }
+    ThermalCommand {
+        command_id: 0x01,
+        data_size: 3,
+        args,
+    }
 }
 
 /// Build the 0x02 Set Thermal Fan Mode request:
@@ -269,7 +314,11 @@ pub fn set_fan_mode(fan: FanId, mode: PerformanceMode, manual: bool) -> ThermalC
     args[1] = fan.wire_value();
     args[2] = mode.wire_value();
     args[3] = u8::from(manual);
-    ThermalCommand { command_id: 0x02, data_size: 4, args }
+    ThermalCommand {
+        command_id: 0x02,
+        data_size: 4,
+        args,
+    }
 }
 
 /// Build the 0x07 Set Custom CPU/GPU Level request: `[profile=1, fan_id, level]`.
@@ -278,7 +327,11 @@ pub fn set_boost(fan: FanId, level: u8) -> ThermalCommand {
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
     args[2] = level;
-    ThermalCommand { command_id: 0x07, data_size: 3, args }
+    ThermalCommand {
+        command_id: 0x07,
+        data_size: 3,
+        args,
+    }
 }
 
 /// Build the 0x81 Get Thermal Fan Speed request: `[profile=1, fan_id]`.
@@ -286,7 +339,11 @@ pub fn get_fan_speed(fan: FanId) -> ThermalCommand {
     let mut args: [u8; 80] = [0; 80];
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
-    ThermalCommand { command_id: 0x81, data_size: 3, args }
+    ThermalCommand {
+        command_id: 0x81,
+        data_size: 3,
+        args,
+    }
 }
 
 /// Build the 0x82 Get Thermal Fan Mode request: `[profile=1, fan_id]`.
@@ -294,7 +351,11 @@ pub fn get_fan_mode(fan: FanId) -> ThermalCommand {
     let mut args: [u8; 80] = [0; 80];
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
-    ThermalCommand { command_id: 0x82, data_size: 4, args }
+    ThermalCommand {
+        command_id: 0x82,
+        data_size: 4,
+        args,
+    }
 }
 
 /// Build the 0x87 Get Custom CPU/GPU Level request: `[profile=1, fan_id]`.
@@ -302,7 +363,11 @@ pub fn get_boost(fan: FanId) -> ThermalCommand {
     let mut args: [u8; 80] = [0; 80];
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
-    ThermalCommand { command_id: 0x87, data_size: 3, args }
+    ThermalCommand {
+        command_id: 0x87,
+        data_size: 3,
+        args,
+    }
 }
 
 /// Build the 0x88 Get Thermal Fan Current Speed request: `[profile=1, fan_id]`.
@@ -310,7 +375,11 @@ pub fn get_current_fan_rpm(fan: FanId) -> ThermalCommand {
     let mut args: [u8; 80] = [0; 80];
     args[0] = THERMAL_PROFILE;
     args[1] = fan.wire_value();
-    ThermalCommand { command_id: 0x88, data_size: 3, args }
+    ThermalCommand {
+        command_id: 0x88,
+        data_size: 3,
+        args,
+    }
 }
 
 /// Decode the 0x80 fan-ID list reply. The payload is count-prefixed: `args[0]`
@@ -321,7 +390,10 @@ pub fn decode_fan_ids(args: &[u8; 80]) -> Result<[FanId; 2], ThermalDecodeError>
     const EXPECTED_COUNT: u8 = 2;
     let count: u8 = args[0];
     if count != EXPECTED_COUNT {
-        return Err(ThermalDecodeError::UnexpectedFanCount { expected: EXPECTED_COUNT, actual: count });
+        return Err(ThermalDecodeError::UnexpectedFanCount {
+            expected: EXPECTED_COUNT,
+            actual: count,
+        });
     }
     // count == 2 is verified before any indexing, so args[1] and args[2] are in bounds.
     let first: FanId = decode_fan_id_byte(args[1], 1)?;
@@ -377,11 +449,17 @@ pub fn decode_fan_setpoint(fan: FanId, args: &[u8; 80]) -> Result<u16, ThermalDe
 /// request, so a stale or cross-zone reply is never read as this zone's value.
 fn verify_reply_identity(fan: FanId, args: &[u8; 80]) -> Result<(), ThermalDecodeError> {
     if args[0] != THERMAL_PROFILE {
-        return Err(ThermalDecodeError::UnexpectedProfile { expected: THERMAL_PROFILE, actual: args[0] });
+        return Err(ThermalDecodeError::UnexpectedProfile {
+            expected: THERMAL_PROFILE,
+            actual: args[0],
+        });
     }
     let expected_fan: u8 = fan.wire_value();
     if args[1] != expected_fan {
-        return Err(ThermalDecodeError::UnexpectedFan { expected: expected_fan, actual: args[1] });
+        return Err(ThermalDecodeError::UnexpectedFan {
+            expected: expected_fan,
+            actual: args[1],
+        });
     }
     Ok(())
 }
@@ -433,7 +511,10 @@ pub struct PreflightReport {
 pub enum ThermalSafetyState {
     Preflight,
     Ready,
-    Manual { target: FanRpm, consecutive_failures: u8 },
+    Manual {
+        target: FanRpm,
+        consecutive_failures: u8,
+    },
     Disabled,
 }
 
@@ -474,7 +555,11 @@ pub enum ThermalFailure {
     TelemetryZero,
     /// A tachometer sample was still outside tolerance after the convergence
     /// deadline that bounds the EC's slew-limited ramp.
-    ConvergenceTimeout { target: u16, observed: u16, tolerance: u16 },
+    ConvergenceTimeout {
+        target: u16,
+        observed: u16,
+        tolerance: u16,
+    },
 }
 
 /// The corrective action a transition requests. Failback returns both fan zones
@@ -500,12 +585,23 @@ pub struct SafetyTransition {
 /// posture is a fixed point: the state is returned unchanged with no action.
 pub fn advance_safety(state: ThermalSafetyState, event: VerificationEvent) -> SafetyTransition {
     let (target, consecutive_failures) = match state {
-        ThermalSafetyState::Manual { target, consecutive_failures } => (target, consecutive_failures),
-        other => return SafetyTransition { state: other, action: None },
+        ThermalSafetyState::Manual {
+            target,
+            consecutive_failures,
+        } => (target, consecutive_failures),
+        other => {
+            return SafetyTransition {
+                state: other,
+                action: None,
+            };
+        }
     };
     match event {
         VerificationEvent::Succeeded => SafetyTransition {
-            state: ThermalSafetyState::Manual { target, consecutive_failures: 0 },
+            state: ThermalSafetyState::Manual {
+                target,
+                consecutive_failures: 0,
+            },
             action: None,
         },
         VerificationEvent::Failed(_) => {
@@ -517,7 +613,10 @@ pub fn advance_safety(state: ThermalSafetyState, event: VerificationEvent) -> Sa
                 }
             } else {
                 SafetyTransition {
-                    state: ThermalSafetyState::Manual { target, consecutive_failures: failures },
+                    state: ThermalSafetyState::Manual {
+                        target,
+                        consecutive_failures: failures,
+                    },
                     action: None,
                 }
             }
@@ -640,8 +739,14 @@ pub enum WakeStepKind {
 /// repair runs.
 pub fn wake_sequence() -> [WakeStep; 2] {
     [
-        WakeStep { delay_secs: 0, kind: WakeStepKind::ApplyAndVerify },
-        WakeStep { delay_secs: WAKE_DELAYED_VERIFY_SECS, kind: WakeStepKind::DelayedReadback },
+        WakeStep {
+            delay_secs: 0,
+            kind: WakeStepKind::ApplyAndVerify,
+        },
+        WakeStep {
+            delay_secs: WAKE_DELAYED_VERIFY_SECS,
+            kind: WakeStepKind::DelayedReadback,
+        },
     ]
 }
 
@@ -753,7 +858,10 @@ mod tests {
         );
         assert_eq!(
             selectable_modes(PowerSource::Battery),
-            &[PerformanceMode::BalancedBattery, PerformanceMode::BatterySaver]
+            &[
+                PerformanceMode::BalancedBattery,
+                PerformanceMode::BatterySaver
+            ]
         );
     }
 
@@ -780,14 +888,23 @@ mod tests {
         // physical unit 2026-07-13: written, read back identically, restored.
         // Hyperboost's runtime power behavior is owner-tested; Razer pairs it
         // with the cooling pad, so the UIs label it accordingly. AC-only.
-        assert!(is_mode_selectable(PowerSource::Ac, PerformanceMode::Hyperboost));
-        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Hyperboost));
+        assert!(is_mode_selectable(
+            PowerSource::Ac,
+            PerformanceMode::Hyperboost
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Battery,
+            PerformanceMode::Hyperboost
+        ));
         assert_eq!(validate_custom_level(3), Ok(3));
     }
 
     #[test]
     fn decodes_recognized_wire_values_only() {
-        assert_eq!(PerformanceMode::try_from(0u8), Ok(PerformanceMode::Balanced));
+        assert_eq!(
+            PerformanceMode::try_from(0u8),
+            Ok(PerformanceMode::Balanced)
+        );
         assert_eq!(
             PerformanceMode::try_from(2u8),
             Ok(PerformanceMode::MaximumPerformance)
@@ -837,14 +954,38 @@ mod tests {
     fn rejects_unavailable_mode_for_power_source() {
         // Balanced is domain-partitioned: wire 0 is the AC slot, wire 6 the
         // battery slot, and neither is selectable in the other domain.
-        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Balanced));
-        assert!(!is_mode_selectable(PowerSource::Ac, PerformanceMode::BalancedBattery));
-        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::MaximumPerformance));
-        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Silent));
-        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Custom));
-        assert!(!is_mode_selectable(PowerSource::Ac, PerformanceMode::BatterySaver));
-        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Hyperboost));
-        assert!(is_mode_selectable(PowerSource::Ac, PerformanceMode::MaximumPerformance));
+        assert!(!is_mode_selectable(
+            PowerSource::Battery,
+            PerformanceMode::Balanced
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Ac,
+            PerformanceMode::BalancedBattery
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Battery,
+            PerformanceMode::MaximumPerformance
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Battery,
+            PerformanceMode::Silent
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Battery,
+            PerformanceMode::Custom
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Ac,
+            PerformanceMode::BatterySaver
+        ));
+        assert!(!is_mode_selectable(
+            PowerSource::Battery,
+            PerformanceMode::Hyperboost
+        ));
+        assert!(is_mode_selectable(
+            PowerSource::Ac,
+            PerformanceMode::MaximumPerformance
+        ));
     }
 
     #[test]
@@ -900,31 +1041,48 @@ mod tests {
 
     #[test]
     fn failure_then_success_resets_the_counter() {
-        let initial: ThermalSafetyState =
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 };
-        let failed: SafetyTransition =
-            advance_safety(initial, VerificationEvent::Failed(ThermalFailure::TelemetryZero));
+        let initial: ThermalSafetyState = ThermalSafetyState::Manual {
+            target: FanRpm(4000),
+            consecutive_failures: 0,
+        };
+        let failed: SafetyTransition = advance_safety(
+            initial,
+            VerificationEvent::Failed(ThermalFailure::TelemetryZero),
+        );
         assert_eq!(
             failed.state,
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 1 }
+            ThermalSafetyState::Manual {
+                target: FanRpm(4000),
+                consecutive_failures: 1
+            }
         );
         assert_eq!(failed.action, None);
-        let recovered: SafetyTransition = advance_safety(failed.state, VerificationEvent::Succeeded);
+        let recovered: SafetyTransition =
+            advance_safety(failed.state, VerificationEvent::Succeeded);
         assert_eq!(
             recovered.state,
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 }
+            ThermalSafetyState::Manual {
+                target: FanRpm(4000),
+                consecutive_failures: 0
+            }
         );
         assert_eq!(recovered.action, None);
     }
 
     #[test]
     fn two_consecutive_failures_request_failback_and_disable() {
-        let initial: ThermalSafetyState =
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 };
-        let first: SafetyTransition =
-            advance_safety(initial, VerificationEvent::Failed(ThermalFailure::TelemetryZero));
-        let second: SafetyTransition =
-            advance_safety(first.state, VerificationEvent::Failed(ThermalFailure::TelemetryZero));
+        let initial: ThermalSafetyState = ThermalSafetyState::Manual {
+            target: FanRpm(4000),
+            consecutive_failures: 0,
+        };
+        let first: SafetyTransition = advance_safety(
+            initial,
+            VerificationEvent::Failed(ThermalFailure::TelemetryZero),
+        );
+        let second: SafetyTransition = advance_safety(
+            first.state,
+            VerificationEvent::Failed(ThermalFailure::TelemetryZero),
+        );
         assert_eq!(second.action, Some(SafetyAction::FailbackBothFans));
         assert_eq!(second.state, ThermalSafetyState::Disabled);
     }
@@ -934,8 +1092,13 @@ mod tests {
         assert!(ThermalSafetyState::Disabled.writes_disabled());
         assert!(!ThermalSafetyState::Ready.writes_disabled());
         assert!(!ThermalSafetyState::Preflight.writes_disabled());
-        assert!(!ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 1 }
-            .writes_disabled());
+        assert!(
+            !ThermalSafetyState::Manual {
+                target: FanRpm(4000),
+                consecutive_failures: 1
+            }
+            .writes_disabled()
+        );
         // Disabled is terminal: any further event keeps it Disabled with no action.
         let after: SafetyTransition = advance_safety(
             ThermalSafetyState::Disabled,
@@ -947,8 +1110,10 @@ mod tests {
 
     #[test]
     fn failback_report_retains_both_results_when_cpu_fails() {
-        let report: FailbackReport =
-            FailbackReport { cpu: ZoneOutcome::Failed, gpu: ZoneOutcome::Restored };
+        let report: FailbackReport = FailbackReport {
+            cpu: ZoneOutcome::Failed,
+            gpu: ZoneOutcome::Restored,
+        };
         // The GPU zone is attempted even though the CPU zone failed, so both
         // outcomes are retained.
         assert_eq!(report.cpu, ZoneOutcome::Failed);
@@ -1008,24 +1173,45 @@ mod tests {
 
     #[test]
     fn fresh_apply_generation_restarts_settle_window() {
-        let watch_v1: ManualWatch = ManualWatch { target: FanRpm(4000), generation: 1 };
+        let watch_v1: ManualWatch = ManualWatch {
+            target: FanRpm(4000),
+            generation: 1,
+        };
         // Same target and generation, settle window elapsed: a cycle is due.
-        assert_eq!(decide_monitor_tick(Some(watch_v1), watch_v1, true), MonitorDecision::RunCycle);
+        assert_eq!(
+            decide_monitor_tick(Some(watch_v1), watch_v1, true),
+            MonitorDecision::RunCycle
+        );
         // Same identity, still inside the window: wait.
-        assert_eq!(decide_monitor_tick(Some(watch_v1), watch_v1, false), MonitorDecision::Waiting);
+        assert_eq!(
+            decide_monitor_tick(Some(watch_v1), watch_v1, false),
+            MonitorDecision::Waiting
+        );
         // A fresh apply of the SAME target value bumps the generation, so the
         // settle window restarts even though the window had elapsed. Two spin-up
         // ticks after a wake re-apply must not be able to trip failback.
-        let watch_v2: ManualWatch = ManualWatch { target: FanRpm(4000), generation: 2 };
-        assert_eq!(decide_monitor_tick(Some(watch_v1), watch_v2, true), MonitorDecision::RestartSettle);
+        let watch_v2: ManualWatch = ManualWatch {
+            target: FanRpm(4000),
+            generation: 2,
+        };
+        assert_eq!(
+            decide_monitor_tick(Some(watch_v1), watch_v2, true),
+            MonitorDecision::RestartSettle
+        );
         // A changed target value also restarts the window.
-        let watch_changed: ManualWatch = ManualWatch { target: FanRpm(5000), generation: 1 };
+        let watch_changed: ManualWatch = ManualWatch {
+            target: FanRpm(5000),
+            generation: 1,
+        };
         assert_eq!(
             decide_monitor_tick(Some(watch_v1), watch_changed, true),
             MonitorDecision::RestartSettle
         );
         // The first observation with nothing tracked starts the window.
-        assert_eq!(decide_monitor_tick(None, watch_v1, true), MonitorDecision::RestartSettle);
+        assert_eq!(
+            decide_monitor_tick(None, watch_v1, true),
+            MonitorDecision::RestartSettle
+        );
     }
 
     #[test]
@@ -1035,12 +1221,18 @@ mod tests {
         assert_eq!(decode_fan_mode(FanId::Cpu, &args), Ok((4, 1)));
         assert_eq!(
             decode_fan_mode(FanId::Gpu, &args),
-            Err(ThermalDecodeError::UnexpectedFan { expected: 2, actual: 1 })
+            Err(ThermalDecodeError::UnexpectedFan {
+                expected: 2,
+                actual: 1
+            })
         );
         args[0] = 0;
         assert_eq!(
             decode_fan_mode(FanId::Cpu, &args),
-            Err(ThermalDecodeError::UnexpectedProfile { expected: 1, actual: 0 })
+            Err(ThermalDecodeError::UnexpectedProfile {
+                expected: 1,
+                actual: 0
+            })
         );
     }
 
@@ -1051,7 +1243,10 @@ mod tests {
         assert_eq!(decode_boost(FanId::Gpu, &args), Ok(2));
         assert_eq!(
             decode_boost(FanId::Cpu, &args),
-            Err(ThermalDecodeError::UnexpectedFan { expected: 1, actual: 2 })
+            Err(ThermalDecodeError::UnexpectedFan {
+                expected: 1,
+                actual: 2
+            })
         );
     }
 
@@ -1063,7 +1258,10 @@ mod tests {
         args[0] = 2;
         assert_eq!(
             decode_fan_setpoint(FanId::Cpu, &args),
-            Err(ThermalDecodeError::UnexpectedProfile { expected: 1, actual: 2 })
+            Err(ThermalDecodeError::UnexpectedProfile {
+                expected: 1,
+                actual: 2
+            })
         );
     }
 
@@ -1146,7 +1344,10 @@ mod tests {
         args[..3].copy_from_slice(&[0, 1, 34]);
         assert_eq!(
             decode_fan_rpm(FanId::Cpu, &args),
-            Err(ThermalDecodeError::UnexpectedProfile { expected: 1, actual: 0 })
+            Err(ThermalDecodeError::UnexpectedProfile {
+                expected: 1,
+                actual: 0
+            })
         );
     }
 
@@ -1156,7 +1357,10 @@ mod tests {
         args[..3].copy_from_slice(&[1, 2, 34]);
         assert_eq!(
             decode_fan_rpm(FanId::Cpu, &args),
-            Err(ThermalDecodeError::UnexpectedFan { expected: 1, actual: 2 })
+            Err(ThermalDecodeError::UnexpectedFan {
+                expected: 1,
+                actual: 2
+            })
         );
     }
 
@@ -1216,17 +1420,34 @@ mod tests {
     #[test]
     fn preflight_is_getter_only() {
         let commands: Vec<ThermalCommand> = preflight_plan();
-        assert!(commands.iter().all(|command| matches!(command.command_id, 0x80 | 0x81 | 0x82 | 0x87 | 0x88)));
-        assert!(commands.iter().all(|command| !matches!(command.command_id, 0x01 | 0x02 | 0x07)));
+        assert!(
+            commands
+                .iter()
+                .all(|command| matches!(command.command_id, 0x80 | 0x81 | 0x82 | 0x87 | 0x88))
+        );
+        assert!(
+            commands
+                .iter()
+                .all(|command| !matches!(command.command_id, 0x01 | 0x02 | 0x07))
+        );
     }
 
     #[test]
     fn preflight_queries_every_getter_for_both_zones() {
         let commands: Vec<ThermalCommand> = preflight_plan();
-        let count = |id: u8| commands.iter().filter(|command| command.command_id == id).count();
+        let count = |id: u8| {
+            commands
+                .iter()
+                .filter(|command| command.command_id == id)
+                .count()
+        };
         assert_eq!(count(0x80), 1);
         for per_zone_getter in [0x81_u8, 0x82, 0x87, 0x88] {
-            assert_eq!(count(per_zone_getter), 2, "getter {per_zone_getter:#x} must cover both zones");
+            assert_eq!(
+                count(per_zone_getter),
+                2,
+                "getter {per_zone_getter:#x} must cover both zones"
+            );
         }
     }
 
@@ -1280,31 +1501,47 @@ mod tests {
             .filter(|step| step.kind == WakeStepKind::ApplyAndVerify)
             .collect();
         assert_eq!(immediate.len(), 1, "exactly one immediate verified apply");
-        assert_eq!(immediate[0].delay_secs, 0, "the immediate apply has no delay");
+        assert_eq!(
+            immediate[0].delay_secs, 0,
+            "the immediate apply has no delay"
+        );
         let delayed: Vec<&WakeStep> = sequence
             .iter()
             .filter(|step| step.kind == WakeStepKind::DelayedReadback)
             .collect();
         assert_eq!(delayed.len(), 1, "exactly one delayed getter-only readback");
-        assert_eq!(delayed[0].delay_secs, 10, "the delayed readback runs at ten seconds");
+        assert_eq!(
+            delayed[0].delay_secs, 10,
+            "the delayed readback runs at ten seconds"
+        );
         assert_eq!(delayed[0].delay_secs, WAKE_DELAYED_VERIFY_SECS);
     }
 
     #[test]
     fn wake_repair_runs_at_most_once_and_only_on_reset() {
-        assert_eq!(decide_wake_repair(WakeVerifyOutcome::StateHeld), WakeRepair::None);
-        assert_eq!(decide_wake_repair(WakeVerifyOutcome::StateReset), WakeRepair::ReapplyOnce);
+        assert_eq!(
+            decide_wake_repair(WakeVerifyOutcome::StateHeld),
+            WakeRepair::None
+        );
+        assert_eq!(
+            decide_wake_repair(WakeVerifyOutcome::StateReset),
+            WakeRepair::ReapplyOnce
+        );
     }
 
     #[test]
     fn failed_wake_repair_feeds_the_normal_failure_counter() {
-        let armed: ThermalSafetyState =
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 };
-        let first: SafetyTransition =
-            advance_after_repair(armed, Err(ThermalFailure::Transport));
+        let armed: ThermalSafetyState = ThermalSafetyState::Manual {
+            target: FanRpm(4000),
+            consecutive_failures: 0,
+        };
+        let first: SafetyTransition = advance_after_repair(armed, Err(ThermalFailure::Transport));
         assert_eq!(
             first.state,
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 1 }
+            ThermalSafetyState::Manual {
+                target: FanRpm(4000),
+                consecutive_failures: 1
+            }
         );
         assert_eq!(first.action, None);
         // A second consecutive failed repair trips the same failback the monitor uses.
@@ -1316,7 +1553,10 @@ mod tests {
         let cleared: SafetyTransition = advance_after_repair(first.state, Ok(()));
         assert_eq!(
             cleared.state,
-            ThermalSafetyState::Manual { target: FanRpm(4000), consecutive_failures: 0 }
+            ThermalSafetyState::Manual {
+                target: FanRpm(4000),
+                consecutive_failures: 0
+            }
         );
         assert_eq!(cleared.action, None);
     }
@@ -1324,13 +1564,26 @@ mod tests {
     #[test]
     fn dgpu_resume_relatches_gpu_boost_only_in_custom() {
         let plan: Vec<ThermalCommand> = dgpu_resume_plan(PerformanceMode::Custom, 2);
-        assert_eq!(plan.len(), 2, "Custom relatch is exactly write then readback");
+        assert_eq!(
+            plan.len(),
+            2,
+            "Custom relatch is exactly write then readback"
+        );
         assert_eq!(plan[0].command_id, 0x07);
         assert_eq!(plan[1].command_id, 0x87);
         // Every command targets the GPU zone: no CPU state, no fan state is touched.
-        assert!(plan.iter().all(|command| command.args[1] == FanId::Gpu.wire_value()));
-        assert!(plan.iter().all(|command| command.args[1] != FanId::Cpu.wire_value()));
-        assert_eq!(plan[0].args[2], 2, "the write carries the requested GPU level");
+        assert!(
+            plan.iter()
+                .all(|command| command.args[1] == FanId::Gpu.wire_value())
+        );
+        assert!(
+            plan.iter()
+                .all(|command| command.args[1] != FanId::Cpu.wire_value())
+        );
+        assert_eq!(
+            plan[0].args[2], 2,
+            "the write carries the requested GPU level"
+        );
     }
 
     #[test]
@@ -1342,7 +1595,10 @@ mod tests {
             PerformanceMode::BatterySaver,
             PerformanceMode::Hyperboost,
         ] {
-            assert!(dgpu_resume_plan(mode, 2).is_empty(), "no dGPU command outside Custom");
+            assert!(
+                dgpu_resume_plan(mode, 2).is_empty(),
+                "no dGPU command outside Custom"
+            );
         }
     }
 }

@@ -4,30 +4,80 @@ use dbus::arg;
 use dbus::blocking;
 
 pub trait OrgFreedesktopDBusProperties {
-    fn get(&self, interface_name: &str, property_name: &str) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error>;
-    fn get_all(&self, interface_name: &str) -> Result<::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, dbus::Error>;
-    fn set(&self, interface_name: &str, property_name: &str, value: arg::Variant<Box<dyn arg::RefArg>>) -> Result<(), dbus::Error>;
+    fn get(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+    ) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error>;
+    fn get_all(
+        &self,
+        interface_name: &str,
+    ) -> Result<
+        ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+        dbus::Error,
+    >;
+    fn set(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+        value: arg::Variant<Box<dyn arg::RefArg>>,
+    ) -> Result<(), dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgFreedesktopDBusProperties for blocking::Proxy<'a, C> {
-
-    fn get(&self, interface_name: &str, property_name: &str) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "Get", (interface_name, property_name, )).map(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>, )| r.0)
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgFreedesktopDBusProperties
+    for blocking::Proxy<'a, C>
+{
+    fn get(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+    ) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error> {
+        self.method_call(
+            "org.freedesktop.DBus.Properties",
+            "Get",
+            (interface_name, property_name),
+        )
+        .map(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>,)| r.0)
     }
 
-    fn get_all(&self, interface_name: &str) -> Result<::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "GetAll", (interface_name, )).map(|r: (::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, )| r.0)
+    fn get_all(
+        &self,
+        interface_name: &str,
+    ) -> Result<
+        ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+        dbus::Error,
+    > {
+        self.method_call(
+            "org.freedesktop.DBus.Properties",
+            "GetAll",
+            (interface_name,),
+        )
+        .map(
+            |r: (
+                ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+            )| r.0,
+        )
     }
 
-    fn set(&self, interface_name: &str, property_name: &str, value: arg::Variant<Box<dyn arg::RefArg>>) -> Result<(), dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "Set", (interface_name, property_name, value, ))
+    fn set(
+        &self,
+        interface_name: &str,
+        property_name: &str,
+        value: arg::Variant<Box<dyn arg::RefArg>>,
+    ) -> Result<(), dbus::Error> {
+        self.method_call(
+            "org.freedesktop.DBus.Properties",
+            "Set",
+            (interface_name, property_name, value),
+        )
     }
 }
 
 #[derive(Debug)]
 pub struct OrgFreedesktopDBusPropertiesPropertiesChanged {
     pub interface_name: String,
-    pub changed_properties: ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
+    pub changed_properties:
+        ::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>,
     pub invalidated_properties: Vec<String>,
 }
 
@@ -58,10 +108,12 @@ pub trait OrgFreedesktopDBusIntrospectable {
     fn introspect(&self) -> Result<String, dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgFreedesktopDBusIntrospectable for blocking::Proxy<'a, C> {
-
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgFreedesktopDBusIntrospectable
+    for blocking::Proxy<'a, C>
+{
     fn introspect(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ()).map(|r: (String, )| r.0)
+        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ())
+            .map(|r: (String,)| r.0)
     }
 }
 
@@ -70,14 +122,16 @@ pub trait OrgFreedesktopDBusPeer {
     fn get_machine_id(&self) -> Result<String, dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgFreedesktopDBusPeer for blocking::Proxy<'a, C> {
-
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgFreedesktopDBusPeer
+    for blocking::Proxy<'a, C>
+{
     fn ping(&self) -> Result<(), dbus::Error> {
         self.method_call("org.freedesktop.DBus.Peer", "Ping", ())
     }
 
     fn get_machine_id(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ()).map(|r: (String, )| r.0)
+        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ())
+            .map(|r: (String,)| r.0)
     }
 }
 
@@ -89,22 +143,26 @@ pub trait OrgGnomeMutterIdleMonitor {
     fn reset_idletime(&self) -> Result<(), dbus::Error>;
 }
 
-impl<'a, C: ::std::ops::Deref<Target=blocking::Connection>> OrgGnomeMutterIdleMonitor for blocking::Proxy<'a, C> {
-
+impl<'a, C: ::std::ops::Deref<Target = blocking::Connection>> OrgGnomeMutterIdleMonitor
+    for blocking::Proxy<'a, C>
+{
     fn get_idletime(&self) -> Result<u64, dbus::Error> {
-        self.method_call("org.gnome.Mutter.IdleMonitor", "GetIdletime", ()).map(|r: (u64, )| r.0)
+        self.method_call("org.gnome.Mutter.IdleMonitor", "GetIdletime", ())
+            .map(|r: (u64,)| r.0)
     }
 
     fn add_idle_watch(&self, interval: u64) -> Result<u32, dbus::Error> {
-        self.method_call("org.gnome.Mutter.IdleMonitor", "AddIdleWatch", (interval, )).map(|r: (u32, )| r.0)
+        self.method_call("org.gnome.Mutter.IdleMonitor", "AddIdleWatch", (interval,))
+            .map(|r: (u32,)| r.0)
     }
 
     fn add_user_active_watch(&self) -> Result<u32, dbus::Error> {
-        self.method_call("org.gnome.Mutter.IdleMonitor", "AddUserActiveWatch", ()).map(|r: (u32, )| r.0)
+        self.method_call("org.gnome.Mutter.IdleMonitor", "AddUserActiveWatch", ())
+            .map(|r: (u32,)| r.0)
     }
 
     fn remove_watch(&self, id: u32) -> Result<(), dbus::Error> {
-        self.method_call("org.gnome.Mutter.IdleMonitor", "RemoveWatch", (id, ))
+        self.method_call("org.gnome.Mutter.IdleMonitor", "RemoveWatch", (id,))
     }
 
     fn reset_idletime(&self) -> Result<(), dbus::Error> {
@@ -125,9 +183,7 @@ impl arg::AppendAll for OrgGnomeMutterIdleMonitorWatchFired {
 
 impl arg::ReadAll for OrgGnomeMutterIdleMonitorWatchFired {
     fn read(i: &mut arg::Iter) -> Result<Self, arg::TypeMismatchError> {
-        Ok(OrgGnomeMutterIdleMonitorWatchFired {
-            id: i.read()?,
-        })
+        Ok(OrgGnomeMutterIdleMonitorWatchFired { id: i.read()? })
     }
 }
 
