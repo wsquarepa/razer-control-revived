@@ -1,0 +1,20 @@
+[package]
+name = "razer-gui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+razer-core = { workspace = true }
+bincode = { workspace = true }
+iced = { version = "0.14", features = ["canvas", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+serde = { workspace = true }
+serde_json = "1.0"
+ksni = { version = "0.3", features = ["blocking"] }
+nvml-wrapper = "0.12"
+log = "0.4.22"
+env_logger = "0.11.5"
