@@ -1,9 +1,7 @@
-#[path = "../comms.rs"]
-mod comms;
 use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(version="0.5.0", about="razer laptop configuration for linux", name="razer-cli")]
+#[command(version, about="razer laptop configuration for linux", name="razer-cli")]
 struct Cli {
     #[command(subcommand)]
     args: Args,
@@ -298,7 +296,7 @@ struct BreathingSingleParams {
 }
 
 fn main() {
-    if std::fs::metadata(comms::socket_path()).is_err() {
+    if std::fs::metadata(razer_core::socket_path()).is_err() {
         eprintln!("Error. Socket doesn't exit. Is daemon running?");
         std::process::exit(1);
     }
@@ -448,10 +446,10 @@ fn validate_and_write_bho(threshold: Option<u8>, state: OnOff) {
 }
 
 fn read_bho() {
-    send_data(comms::DaemonCommand::GetBatteryHealthOptimizer()).map_or_else(
+    send_data(razer_core::DaemonCommand::GetBatteryHealthOptimizer()).map_or_else(
         || eprintln!("Unknown error occured when getting bho"),
         |result| {
-            if let comms::DaemonResponse::GetBatteryHealthOptimizer { is_on, threshold } = result {
+            if let razer_core::DaemonResponse::GetBatteryHealthOptimizer { is_on, threshold } = result {
                 match is_on {
                     true => {
                         println!(
@@ -483,14 +481,14 @@ fn bho_toggle_on(threshold: u8) {
         return;
     }
 
-    send_data(comms::DaemonCommand::SetBatteryHealthOptimizer {
+    send_data(razer_core::DaemonCommand::SetBatteryHealthOptimizer {
         is_on: true,
         threshold: threshold,
     })
     .map_or_else(
         || eprintln!("Unknown error occured when toggling bho"),
         |result| {
-            if let comms::DaemonResponse::SetBatteryHealthOptimizer { result } = result {
+            if let razer_core::DaemonResponse::SetBatteryHealthOptimizer { result } = result {
                 match result {
                     true => {
                         println!(
@@ -520,14 +518,14 @@ fn valid_bho_threshold(threshold: u8) -> bool {
 }
 
 fn bho_toggle_off() {
-    send_data(comms::DaemonCommand::SetBatteryHealthOptimizer {
+    send_data(razer_core::DaemonCommand::SetBatteryHealthOptimizer {
         is_on: false,
         threshold: 80,
     })
     .map_or_else(
         || eprintln!("Unknown error occured when toggling bho"),
         |result| {
-            if let comms::DaemonResponse::SetBatteryHealthOptimizer { result } = result {
+            if let razer_core::DaemonResponse::SetBatteryHealthOptimizer { result } = result {
                 match result {
                     true => {
                         println!("Successfully turned off bho");
@@ -542,8 +540,8 @@ fn bho_toggle_off() {
 }
 
 fn send_standard_effect(name: String, params: Vec<u8>) {
-    match send_data(comms::DaemonCommand::SetStandardEffect { name, params }) {
-        Some(comms::DaemonResponse::SetStandardEffect { result }) => {
+    match send_data(razer_core::DaemonCommand::SetStandardEffect { name, params }) {
+        Some(razer_core::DaemonResponse::SetStandardEffect { result }) => {
             if result {
                 println!("Effect set OK!");
             } else {
@@ -556,8 +554,8 @@ fn send_standard_effect(name: String, params: Vec<u8>) {
 }
 
 fn send_effect(name: String, params: Vec<u8>) {
-    match send_data(comms::DaemonCommand::SetEffect { name, params }) {
-        Some(comms::DaemonResponse::SetEffect { result }) => {
+    match send_data(razer_core::DaemonCommand::SetEffect { name, params }) {
+        Some(razer_core::DaemonResponse::SetEffect { result }) => {
             if result {
                 println!("Effect set OK!");
             } else {
@@ -569,9 +567,9 @@ fn send_effect(name: String, params: Vec<u8>) {
     }
 }
 
-fn send_data(opt: comms::DaemonCommand) -> Option<comms::DaemonResponse> {
-    match comms::bind() {
-        Some(socket) => comms::send_to_daemon(opt, socket),
+fn send_data(opt: razer_core::DaemonCommand) -> Option<razer_core::DaemonResponse> {
+    match razer_core::bind() {
+        Some(socket) => razer_core::send_to_daemon(opt, socket),
         None => {
             eprintln!("Error. Cannot bind to socket");
             None
@@ -580,8 +578,8 @@ fn send_data(opt: comms::DaemonCommand) -> Option<comms::DaemonResponse> {
 }
 
 fn read_fan_rpm(ac: usize) {
-    match send_data(comms::DaemonCommand::GetFanSpeed { ac }) {
-        Some(comms::DaemonResponse::GetFanSpeed { rpm }) => {
+    match send_data(razer_core::DaemonCommand::GetFanSpeed { ac }) {
+        Some(razer_core::DaemonResponse::GetFanSpeed { rpm }) => {
             let rpm_desc: String = match rpm {
                 f if f < 0 => String::from("Unknown"),
                 0 => String::from("Auto (0)"),
@@ -595,26 +593,26 @@ fn read_fan_rpm(ac: usize) {
 }
 
 fn read_actual_fan_rpm() {
-    match send_data(comms::DaemonCommand::GetThermalStatus) {
-        Some(comms::DaemonResponse::GetThermalStatus { status }) => print_thermal_status(&status),
+    match send_data(razer_core::DaemonCommand::GetThermalStatus) {
+        Some(razer_core::DaemonResponse::GetThermalStatus { status }) => print_thermal_status(&status),
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown daemon error!"),
     }
 }
 
-fn print_thermal_status(status: &comms::ThermalStatus) {
+fn print_thermal_status(status: &razer_core::ThermalStatus) {
     let safety: &str = match status.safety_state {
-        comms::ThermalSafetyStateDto::Preflight => "Preflight",
-        comms::ThermalSafetyStateDto::Ready => "Ready",
-        comms::ThermalSafetyStateDto::Manual => "Manual",
-        comms::ThermalSafetyStateDto::Disabled => "Disabled",
+        razer_core::ThermalSafetyStateDto::Preflight => "Preflight",
+        razer_core::ThermalSafetyStateDto::Ready => "Ready",
+        razer_core::ThermalSafetyStateDto::Manual => "Manual",
+        razer_core::ThermalSafetyStateDto::Disabled => "Disabled",
     };
     let fan_mode: &str = match status.fan_mode {
-        comms::FanControlModeDto::Automatic => "Automatic",
-        comms::FanControlModeDto::Fixed => "Fixed",
+        razer_core::FanControlModeDto::Automatic => "Automatic",
+        razer_core::FanControlModeDto::Fixed => "Fixed",
     };
     println!("Thermal safety: {}", safety);
-    println!("Power mode: {}", comms::performance_mode_display(status.performance_mode));
+    println!("Power mode: {}", razer_core::performance_mode_display(status.performance_mode));
     println!("Fan mode: {}", fan_mode);
     // rpm fields are meaningful only when no error is present.
     match &status.error {
@@ -629,8 +627,8 @@ fn print_thermal_status(status: &comms::ThermalStatus) {
 }
 
 fn read_logo_mode(ac: usize) {
-    match send_data(comms::DaemonCommand::GetLogoLedState { ac }) {
-        Some(comms::DaemonResponse::GetLogoLedState { logo_state }) => {
+    match send_data(razer_core::DaemonCommand::GetLogoLedState { ac }) {
+        Some(razer_core::DaemonResponse::GetLogoLedState { logo_state }) => {
             let logo_state_desc: &str = match logo_state {
                 0 => "Off",
                 1 => "On",
@@ -656,18 +654,18 @@ fn boost_level_label(level: u8) -> &'static str {
 }
 
 fn read_power_mode(ac: usize) {
-    if let Some(resp) = send_data(comms::DaemonCommand::GetPwrLevel { ac }) {
-        if let comms::DaemonResponse::GetPwrLevel { pwr } = resp {
+    if let Some(resp) = send_data(razer_core::DaemonCommand::GetPwrLevel { ac }) {
+        if let razer_core::DaemonResponse::GetPwrLevel { pwr } = resp {
             // Stable KDE-widget contract: `Name (N)` with the wire number in parens.
-            println!("Current power setting: {}", comms::performance_mode_display(pwr));
+            println!("Current power setting: {}", razer_core::performance_mode_display(pwr));
             if pwr == 4 {
-                if let Some(resp) = send_data(comms::DaemonCommand::GetCPUBoost { ac }) {
-                    if let comms::DaemonResponse::GetCPUBoost { cpu } = resp {
+                if let Some(resp) = send_data(razer_core::DaemonCommand::GetCPUBoost { ac }) {
+                    if let razer_core::DaemonResponse::GetCPUBoost { cpu } = resp {
                         println!("Current CPU setting: {}", boost_level_label(cpu));
                     };
                 }
-                if let Some(resp) = send_data(comms::DaemonCommand::GetGPUBoost { ac }) {
-                    if let comms::DaemonResponse::GetGPUBoost { gpu } = resp {
+                if let Some(resp) = send_data(razer_core::DaemonCommand::GetGPUBoost { ac }) {
+                    if let razer_core::DaemonResponse::GetGPUBoost { gpu } = resp {
                         println!("Current GPU setting: {}", boost_level_label(gpu));
                     };
                 }
@@ -696,13 +694,13 @@ fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Optio
     let gm = gpu_mode.unwrap_or(0);
     validate_boost_level(gm, "GPU");
 
-    match send_data(comms::DaemonCommand::SetPowerMode {
+    match send_data(razer_core::DaemonCommand::SetPowerMode {
         ac,
         pwr: pwr_mode,
         cpu: cm,
         gpu: gm,
     }) {
-        Some(comms::DaemonResponse::SetPowerMode { result }) => report_command_result(result, || read_power_mode(ac)),
+        Some(razer_core::DaemonResponse::SetPowerMode { result }) => report_command_result(result, || read_power_mode(ac)),
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => {
             Cli::command()
@@ -730,16 +728,16 @@ fn validate_boost_level(level: u8, zone: &str) {
 
 /// Surface a setter outcome: run `on_applied` when the daemon applied the write,
 /// otherwise print the daemon's rejection reason.
-fn report_command_result<F: FnOnce()>(result: comms::CommandResult, on_applied: F) {
+fn report_command_result<F: FnOnce()>(result: razer_core::CommandResult, on_applied: F) {
     match result {
-        comms::CommandResult::Applied => on_applied(),
-        comms::CommandResult::Rejected { reason } => eprintln!("Command rejected: {reason}"),
+        razer_core::CommandResult::Applied => on_applied(),
+        razer_core::CommandResult::Rejected { reason } => eprintln!("Command rejected: {reason}"),
     }
 }
 
 fn read_brightness(ac: usize) {
-    match send_data(comms::DaemonCommand::GetBrightness { ac }) {
-        Some(comms::DaemonResponse::GetBrightness { result }) => {
+    match send_data(razer_core::DaemonCommand::GetBrightness { ac }) {
+        Some(razer_core::DaemonResponse::GetBrightness { result }) => {
             println!("Current brightness: {}", result);
         },
         Some(_) => eprintln!("Daemon responded with invalid data!"),
@@ -748,8 +746,8 @@ fn read_brightness(ac: usize) {
 }
 
 fn read_sync() {
-    match send_data(comms::DaemonCommand::GetSync()) {
-        Some(comms::DaemonResponse::GetSync { sync }) => {
+    match send_data(razer_core::DaemonCommand::GetSync()) {
+        Some(razer_core::DaemonResponse::GetSync { sync }) => {
             println!("Current sync: {:?}", sync);
         },
         Some(_) => eprintln!("Daemon responded with invalid data!"),
@@ -758,37 +756,37 @@ fn read_sync() {
 }
 
 fn write_brightness(ac: usize, val: u8) {
-    match send_data(comms::DaemonCommand::SetBrightness { ac, val }) {
+    match send_data(razer_core::DaemonCommand::SetBrightness { ac, val }) {
         Some(_) => read_brightness(ac),
         None => eprintln!("Unknown error!"),
     }
 }
 
 fn write_fan_speed(ac: usize, x: i32) {
-    match send_data(comms::DaemonCommand::SetFanSpeed { ac, rpm: x }) {
-        Some(comms::DaemonResponse::SetFanSpeed { result }) => report_command_result(result, || read_fan_rpm(ac)),
+    match send_data(razer_core::DaemonCommand::SetFanSpeed { ac, rpm: x }) {
+        Some(razer_core::DaemonResponse::SetFanSpeed { result }) => report_command_result(result, || read_fan_rpm(ac)),
         Some(_) => eprintln!("Daemon responded with invalid data!"),
         None => eprintln!("Unknown error!"),
     }
 }
 
 fn write_logo_mode(ac: usize, x: u8) {
-    match send_data(comms::DaemonCommand::SetLogoLedState { ac, logo_state: x }) {
+    match send_data(razer_core::DaemonCommand::SetLogoLedState { ac, logo_state: x }) {
         Some(_) => read_logo_mode(ac),
         None => eprintln!("Unknown error!"),
     }
 }
 
 fn write_sync(sync: bool) {
-    match send_data(comms::DaemonCommand::SetSync { sync }) {
+    match send_data(razer_core::DaemonCommand::SetSync { sync }) {
         Some(_) => read_sync(),
         None => eprintln!("Unknown error!"),
     }
 }
 
 fn read_gpu_status() {
-    match send_data(comms::DaemonCommand::GetGpuStatus) {
-        Some(comms::DaemonResponse::GetGpuStatus { gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available }) => {
+    match send_data(razer_core::DaemonCommand::GetGpuStatus) {
+        Some(razer_core::DaemonResponse::GetGpuStatus { gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available }) => {
             println!("Detected GPUs:");
             for gpu in &gpus {
                 let type_label = if gpu.gpu_type == "dgpu" { "dGPU" } else { "iGPU" };
@@ -807,8 +805,8 @@ fn read_gpu_status() {
 }
 
 fn write_runtime_pm(enabled: bool) {
-    match send_data(comms::DaemonCommand::SetDgpuRuntimePM { enabled }) {
-        Some(comms::DaemonResponse::SetDgpuRuntimePM { result }) => {
+    match send_data(razer_core::DaemonCommand::SetDgpuRuntimePM { enabled }) {
+        Some(razer_core::DaemonResponse::SetDgpuRuntimePM { result }) => {
             if result {
                 println!("dGPU runtime PM set to {}", if enabled { "auto (power saving)" } else { "on (always active)" });
             } else {
@@ -821,8 +819,8 @@ fn write_runtime_pm(enabled: bool) {
 }
 
 fn write_gpu_mode(mode: &str) {
-    match send_data(comms::DaemonCommand::SetGpuMode { mode: mode.to_string() }) {
-        Some(comms::DaemonResponse::SetGpuMode { result, message }) => {
+    match send_data(razer_core::DaemonCommand::SetGpuMode { mode: mode.to_string() }) {
+        Some(razer_core::DaemonResponse::SetGpuMode { result, message }) => {
             if result {
                 println!("{}", message);
             } else {

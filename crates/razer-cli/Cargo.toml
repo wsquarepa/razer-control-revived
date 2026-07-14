@@ -1,0 +1,12 @@
+[package]
+name = "razer-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+razer-core = { workspace = true }
+clap = { version = "4.4.13", features = ["derive"] }

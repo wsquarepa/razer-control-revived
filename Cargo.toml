@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/razer-core", "crates/razer-daemon"]
+members = ["crates/razer-core", "crates/razer-daemon", "crates/razer-cli"]
 exclude = ["razer_control_gui"]
 
 [workspace.package]
