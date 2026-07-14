@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/razer-core", "crates/razer-daemon", "crates/razer-cli"]
+members = ["crates/razer-core", "crates/razer-daemon", "crates/razer-cli", "xtask"]
 
 [workspace.package]
 version = "0.5.0"
