@@ -1,5 +1,7 @@
 #[allow(dead_code)]
 mod daemon;
+#[allow(dead_code)]
+mod telemetry;
 mod theme;
 
 use iced::widget::{container, text};
