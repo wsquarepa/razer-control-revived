@@ -1,0 +1,13 @@
+[package]
+name = "razer-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+bincode = { workspace = true }
+libc = "0.2"
