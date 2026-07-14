@@ -65,11 +65,6 @@ pub enum MigrationWarning {
         requested_wire_value: u8,
         migrated_wire_value: u8,
     },
-    ExtremeLevelGated {
-        power_source: &'static str,
-        zone: BoostZone,
-        migrated_level: u8,
-    },
     RpmOutOfRange {
         power_source: &'static str,
         requested_rpm: i32,
@@ -134,18 +129,9 @@ fn migrate_level(
     level: u8,
     source: PowerSource,
     zone: BoostZone,
-    warnings: &mut Vec<MigrationWarning>,
 ) -> Result<u8, ConfigurationError> {
     match level {
-        0..=2 => Ok(level),
-        3 => {
-            warnings.push(MigrationWarning::ExtremeLevelGated {
-                power_source: power_source_label(source),
-                zone,
-                migrated_level: 2,
-            });
-            Ok(2)
-        }
+        0..=3 => Ok(level),
         _ => Err(ConfigurationError::UnknownLegacyLevel {
             power_source: power_source_label(source),
             zone,
@@ -201,8 +187,8 @@ pub fn migrate_for_pid(
         let named_mode: PerformanceMode = migrate_legacy_mode(profile.power_mode, source)?;
         let available_mode: PerformanceMode =
             migrate_availability(named_mode, source, &mut warnings);
-        let cpu_boost: u8 = migrate_level(profile.cpu_boost, source, BoostZone::Cpu, &mut warnings)?;
-        let gpu_boost: u8 = migrate_level(profile.gpu_boost, source, BoostZone::Gpu, &mut warnings)?;
+        let cpu_boost: u8 = migrate_level(profile.cpu_boost, source, BoostZone::Cpu)?;
+        let gpu_boost: u8 = migrate_level(profile.gpu_boost, source, BoostZone::Gpu)?;
         let fan_rpm: i32 = migrate_rpm(profile.fan_rpm, available_mode, source, &mut warnings);
         profile.power_mode = available_mode.wire_value();
         profile.cpu_boost = cpu_boost;
@@ -398,7 +384,9 @@ mod tests {
     }
 
     #[test]
-    fn migrates_extreme_levels_to_high_in_both_zones() {
+    fn migrates_extreme_levels_unchanged_in_both_zones() {
+        // Level 3 (Extreme) latch-validated on the physical unit; migration
+        // preserves it instead of gating it down.
         for legacy_mode in [0u8, 4u8] {
             for ac in [0usize, 1usize] {
                 let mut configuration: Configuration = legacy_configuration();
@@ -406,14 +394,14 @@ mod tests {
                 configuration.power[ac].cpu_boost = 3;
                 configuration.power[ac].gpu_boost = 3;
                 let outcome: MigrationOutcome = migrate(configuration);
-                assert_eq!(outcome.configuration.power[ac].cpu_boost, 2);
-                assert_eq!(outcome.configuration.power[ac].gpu_boost, 2);
-                let gated_warnings = outcome
+                assert_eq!(outcome.configuration.power[ac].cpu_boost, 3);
+                assert_eq!(outcome.configuration.power[ac].gpu_boost, 3);
+                // Only mode-availability may warn (battery Custom moves to 6);
+                // preserved Extreme levels never generate a warning.
+                assert!(outcome
                     .warnings
                     .iter()
-                    .filter(|warning| matches!(warning, MigrationWarning::ExtremeLevelGated { .. }))
-                    .count();
-                assert_eq!(gated_warnings, 2);
+                    .all(|warning| matches!(warning, MigrationWarning::ModeUnavailableOnSource { .. })));
             }
         }
     }
@@ -499,8 +487,8 @@ mod tests {
             migrate_for_pid(legacy, thermal::BLADE_16_2025_PID).unwrap();
         assert_eq!(outcome.configuration.power[0].power_mode, 6);
         assert_eq!(outcome.configuration.power[1].power_mode, 4);
-        assert_eq!(outcome.configuration.power[0].cpu_boost, 2);
-        assert_eq!(outcome.configuration.power[1].gpu_boost, 2);
+        assert_eq!(outcome.configuration.power[0].cpu_boost, 3);
+        assert_eq!(outcome.configuration.power[1].gpu_boost, 3);
         assert_eq!(outcome.configuration.power[0].fan_rpm, 0);
         assert_eq!(outcome.configuration.power[1].fan_rpm, 0);
         assert_eq!(outcome.configuration.schema_version, CURRENT_SCHEMA_VERSION);

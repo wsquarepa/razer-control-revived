@@ -1146,7 +1146,13 @@ fn is_blade_16_2025(device: &SupportedDevice) -> bool {
 fn power_mode_choices(device: &SupportedDevice, ac: bool) -> Vec<(&'static str, u8)> {
     if is_blade_16_2025(device) {
         if ac {
-            vec![("Balanced", 0), ("Silent", 5), ("Maximum Performance", 2), ("Custom", 4)]
+            vec![
+                ("Balanced", 0),
+                ("Silent", 5),
+                ("Maximum Performance", 2),
+                ("Custom", 4),
+                ("Hyperboost", 7),
+            ]
         } else {
             vec![("Balanced", 6), ("Battery Saver", 3)]
         }
@@ -1169,6 +1175,7 @@ fn mode_description(is_2025: bool, wire: u8) -> &'static str {
             3 => "Extends battery life, reduced performance",
             4 => "Manually tune CPU and GPU levels",
             5 => "Minimal noise, reduced performance",
+            7 => "Highest wattage; Razer pairs this with the cooling pad, runs hot without it",
             _ => "",
         }
     } else {
@@ -1212,9 +1219,9 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     );
     power_section.add_row(&power_combo);
 
-    // Custom levels on this SKU are Low/Medium/High only; level 3 (Boost/Extreme)
-    // is gated, so it is never offered on the 2025 device.
-    let boost_options: &[&str] = if is_2025 || !device.can_boost() {
+    let boost_options: &[&str] = if is_2025 {
+        &["Low", "Medium", "High", "Extreme"]
+    } else if !device.can_boost() {
         &["Low", "Medium", "High"]
     } else {
         &["Low", "Medium", "High", "Boost"]
@@ -1227,11 +1234,7 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     );
     power_section.add_row(&cpu_combo);
 
-    let gpu_options: &[&str] = if is_2025 {
-        &["Low", "Medium", "High"]
-    } else {
-        &["Low", "Medium", "High", "Extreme"]
-    };
+    let gpu_options: &[&str] = &["Low", "Medium", "High", "Extreme"];
     let gpu_combo = make_combo_row(
         "GPU Performance",
         "Graphics performance level",

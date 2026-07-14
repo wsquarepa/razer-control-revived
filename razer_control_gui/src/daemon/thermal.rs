@@ -4,9 +4,10 @@
 //! RPM ranges are Synapse product-710 configuration defaults and are the
 //! permanent validation basis: the EC does not implement `0x86` Get Thermal
 //! Fan Information (verified NOT_SUPPORTED on the physical unit), so no
-//! EC-reported limits exist to replace them. Hyperboost and custom level 3
-//! (Extreme) are recognized for decoding but rejected by every setter-facing
-//! validation until the gated hardware validation passes.
+//! EC-reported limits exist to replace them. Hyperboost (7) and custom level
+//! 3 (Extreme) are exposed: both passed the supervised latch validation on
+//! the physical unit (2026-07-13). Hyperboost is AC-only and its UIs note
+//! that Razer pairs it with the cooling pad.
 
 pub const BLADE_16_2025_PID: u16 = 0x02c6;
 
@@ -42,9 +43,8 @@ pub enum PowerSource {
     Battery,
 }
 
-/// Performance modes the 02C6 EC recognizes. Recognized is wider than
-/// selectable: Hyperboost decodes but is never offered (see
-/// `selectable_modes`).
+/// Performance modes the 02C6 EC recognizes. All decode; selectability is
+/// per power domain (see `selectable_modes`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PerformanceMode {
     Balanced,
@@ -111,7 +111,6 @@ pub enum ThermalPolicyError {
     UnknownMode { wire_value: u8 },
     ModeNotSelectable { mode: PerformanceMode, source: PowerSource },
     RpmOutOfRange { mode: PerformanceMode, requested_rpm: i32, range: RpmRange },
-    ExtremeNotValidated,
     LevelOutOfRange { level: u8 },
 }
 
@@ -131,12 +130,6 @@ impl std::fmt::Display for ThermalPolicyError {
                     range.min, range.max
                 )
             }
-            ThermalPolicyError::ExtremeNotValidated => {
-                write!(
-                    formatter,
-                    "custom level 3 (Extreme) is not validated on this unit and stays disabled"
-                )
-            }
             ThermalPolicyError::LevelOutOfRange { level } => {
                 write!(formatter, "custom level {level} is not a recognized level (0-3)")
             }
@@ -144,11 +137,12 @@ impl std::fmt::Display for ThermalPolicyError {
     }
 }
 
-const AC_SELECTABLE_MODES: [PerformanceMode; 4] = [
+const AC_SELECTABLE_MODES: [PerformanceMode; 5] = [
     PerformanceMode::Balanced,
     PerformanceMode::Silent,
     PerformanceMode::MaximumPerformance,
     PerformanceMode::Custom,
+    PerformanceMode::Hyperboost,
 ];
 
 const BATTERY_SELECTABLE_MODES: [PerformanceMode; 2] =
@@ -163,9 +157,9 @@ pub const fn balanced_for(source: PowerSource) -> PerformanceMode {
     }
 }
 
-/// Modes the daemon offers for the given power source. Hyperboost is
-/// recognized but never offered: Synapse runtime-gates it and this SKU has
-/// not passed the supervised write/readback validation.
+/// Modes the daemon offers for the given power source. Hyperboost is AC-only:
+/// it is an AC-domain wire value, and Razer pairs it with the cooling pad, so
+/// the frontends label it accordingly.
 pub fn selectable_modes(source: PowerSource) -> &'static [PerformanceMode] {
     match source {
         PowerSource::Ac => &AC_SELECTABLE_MODES,
@@ -216,13 +210,12 @@ pub fn validate_fixed_rpm(
     Ok(Some(FanRpm(requested_rpm as u16)))
 }
 
-/// Validate a custom CPU/GPU level for the 0x07 setter. Levels 0-2 pass;
-/// level 3 (Extreme) is recognized for display but stays write-disabled until
-/// the supervised hardware gate proves it on this unit.
+/// Validate a custom CPU/GPU level for the 0x07 setter. Levels 0-3 pass;
+/// level 3 (Extreme) passed its supervised latch validation on the physical
+/// unit (2026-07-13, both zones, write + identical readback).
 pub fn validate_custom_level(level: u8) -> Result<u8, ThermalPolicyError> {
     match level {
-        0..=2 => Ok(level),
-        3 => Err(ThermalPolicyError::ExtremeNotValidated),
+        0..=3 => Ok(level),
         _ => Err(ThermalPolicyError::LevelOutOfRange { level }),
     }
 }
@@ -755,6 +748,7 @@ mod tests {
                 PerformanceMode::Silent,
                 PerformanceMode::MaximumPerformance,
                 PerformanceMode::Custom,
+                PerformanceMode::Hyperboost,
             ]
         );
         assert_eq!(
@@ -781,12 +775,14 @@ mod tests {
     }
 
     #[test]
-    fn gates_unvalidated_features() {
-        assert!(!is_mode_selectable(PowerSource::Ac, PerformanceMode::Hyperboost));
-        assert_eq!(
-            validate_custom_level(3),
-            Err(ThermalPolicyError::ExtremeNotValidated)
-        );
+    fn exposes_hardware_validated_features() {
+        // Custom level 3 (Extreme) and Hyperboost (7) latch-validated on the
+        // physical unit 2026-07-13: written, read back identically, restored.
+        // Hyperboost's runtime power behavior is owner-tested; Razer pairs it
+        // with the cooling pad, so the UIs label it accordingly. AC-only.
+        assert!(is_mode_selectable(PowerSource::Ac, PerformanceMode::Hyperboost));
+        assert!(!is_mode_selectable(PowerSource::Battery, PerformanceMode::Hyperboost));
+        assert_eq!(validate_custom_level(3), Ok(3));
     }
 
     #[test]

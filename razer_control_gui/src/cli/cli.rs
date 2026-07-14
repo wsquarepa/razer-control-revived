@@ -679,19 +679,11 @@ fn read_power_mode(ac: usize) {
 }
 
 fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Option<u8>) {
-    if pwr_mode == 7 {
+    if !matches!(pwr_mode, 0 | 2 | 3 | 4 | 5 | 6 | 7) {
         Cli::command()
             .error(
                 ErrorKind::InvalidValue,
-                "Hyperboost (mode 7) is not validated on this unit and is disabled",
-            )
-            .exit()
-    }
-    if !matches!(pwr_mode, 0 | 2 | 3 | 4 | 5 | 6) {
-        Cli::command()
-            .error(
-                ErrorKind::InvalidValue,
-                "Power mode must be 0 (Balanced, AC), 2 (Maximum Performance), 3 (Battery Saver), 4 (Custom), 5 (Silent) or 6 (Balanced, battery)",
+                "Power mode must be 0 (Balanced, AC), 2 (Maximum Performance), 3 (Battery Saver), 4 (Custom), 5 (Silent), 6 (Balanced, battery) or 7 (Hyperboost, AC)",
             )
             .exit()
     }
@@ -723,22 +715,14 @@ fn write_pwr_mode(ac: usize, pwr_mode: u8, cpu_mode: Option<u8>, gpu_mode: Optio
     }
 }
 
-/// Reject a custom boost level the UI must not offer. Low/Medium/High (0-2) pass;
-/// level 3 (Extreme) is gated on this unit; anything higher is not a level.
+/// Reject a custom boost level that is not a level. Low/Medium/High/Extreme
+/// (0-3) pass; Extreme latch-validated on the physical unit 2026-07-13.
 fn validate_boost_level(level: u8, zone: &str) {
-    if level == 3 {
-        Cli::command()
-            .error(
-                ErrorKind::InvalidValue,
-                format!("{zone} level 3 (Extreme) is not validated on this unit and is disabled"),
-            )
-            .exit()
-    }
     if level > 3 {
         Cli::command()
             .error(
                 ErrorKind::InvalidValue,
-                format!("{zone} level must be 0 (Low), 1 (Medium) or 2 (High)"),
+                format!("{zone} level must be 0 (Low), 1 (Medium), 2 (High) or 3 (Extreme)"),
             )
             .exit()
     }

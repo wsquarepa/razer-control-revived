@@ -53,15 +53,16 @@ PlasmoidItem {
     // Blade 16 2025 profile and fan-preset model. availableProfiles() lists the
     // wire values the SKU offers on the current power source; fanPresets() gives
     // the cycling RPM steps (Auto plus four provisional points) for the active
-    // profile. Neither Hyperboost (7) nor Extreme is exposed.
+    // profile. Hyperboost (7) is AC-only; Razer pairs it with the cooling pad.
     function availableProfiles() {
-        return root.acState === "ac" ? [0, 5, 2, 4] : [6, 3]
+        return root.acState === "ac" ? [0, 5, 2, 4, 7] : [6, 3]
     }
     function fanPresets() {
         switch (parseInt(root.powerProfile)) {
         case 0: case 5: case 6: return [0, 3400, 4000, 4600, 5200]
         case 2: case 3: return [0, 3300, 4000, 4700, 5400]
         case 4: return [0, 4000, 4400, 4900, 5300]
+        case 7: return [0, 3700, 4200, 4800, 5300]
         default: return [0]
         }
     }
@@ -440,7 +441,7 @@ PlasmoidItem {
                             QQC2.Label { text: "Profile"; font.weight: Font.DemiBold; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
                             Item { Layout.fillWidth: true }
                             QQC2.Label {
-                                text: { switch(powerProfile) { case "0": case "6": return "Balanced"; case "2": return "Maximum Performance"; case "3": return "Battery Saver"; case "4": return "Custom"; case "5": return "Silent"; default: return "--"; } }
+                                text: { switch(powerProfile) { case "0": case "6": return "Balanced"; case "2": return "Maximum Performance"; case "3": return "Battery Saver"; case "4": return "Custom"; case "5": return "Silent"; case "7": return "Hyperboost"; default: return "--"; } }
                                 font.bold: true; font.pixelSize: Kirigami.Theme.smallFont.pixelSize; color: Kirigami.Theme.positiveTextColor
                             }
                             Kirigami.Icon { source: "go-next-symbolic"; Layout.preferredWidth: 12; Layout.preferredHeight: 12; opacity: 0.4 }

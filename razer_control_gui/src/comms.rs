@@ -91,8 +91,8 @@ pub enum CommandResult {
 }
 
 /// Blade 16 2025 performance-mode display name for a wire value. Only the modes
-/// this SKU offers have names; recognized-but-gated Hyperboost (7) and every
-/// unrecognized value are "Unknown". No pre-2025 label taxonomy is used here.
+/// this SKU offers have names; unrecognized values (including the hidden
+/// mode-1 "Gaming ghost") are "Unknown". No pre-2025 label taxonomy is used.
 #[allow(dead_code)]
 pub fn performance_mode_label(wire_mode: u8) -> &'static str {
     match wire_mode {
@@ -102,6 +102,7 @@ pub fn performance_mode_label(wire_mode: u8) -> &'static str {
         3 => "Battery Saver",
         4 => "Custom",
         5 => "Silent",
+        7 => "Hyperboost",
         _ => "Unknown",
     }
 }
@@ -124,6 +125,7 @@ pub fn provisional_rpm_range(wire_mode: u8) -> (u16, u16) {
         0 | 5 | 6 => (3400, 5200),
         2 | 3 => (3300, 5400),
         4 => (4000, 5300),
+        7 => (3700, 5300),
         _ => (3300, 5400),
     }
 }
@@ -391,12 +393,13 @@ mod tests {
     }
 
     #[test]
-    fn does_not_expose_hyperboost_or_unknown_modes_by_name() {
+    fn labels_every_offered_mode_and_hides_unknown_values() {
         assert_eq!(performance_mode_label(6), "Balanced");
         assert_eq!(provisional_rpm_range(6), (3400, 5200));
-        assert_eq!(performance_mode_label(7), "Unknown");
+        assert_eq!(performance_mode_label(7), "Hyperboost");
+        assert_eq!(provisional_rpm_range(7), (3700, 5300));
         assert_eq!(performance_mode_label(1), "Unknown");
-        assert_eq!(performance_mode_display(7), "Unknown (7)");
+        assert_eq!(performance_mode_display(7), "Hyperboost (7)");
     }
 
     #[test]
