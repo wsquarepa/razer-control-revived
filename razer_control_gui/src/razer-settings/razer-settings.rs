@@ -312,6 +312,28 @@ fn command_applied(result: comms::CommandResult) -> bool {
     }
 }
 
+fn get_thermal_status() -> Option<comms::ThermalStatus> {
+    let response = send_data(comms::DaemonCommand::GetThermalStatus)?;
+    use comms::DaemonResponse::*;
+    match response {
+        GetThermalStatus { status } => Some(status),
+        response => {
+            println!("Instead of GetThermalStatus got {response:?}");
+            None
+        }
+    }
+}
+
+/// Live tachometer text for fan displays: both zones' current RPM when the
+/// daemon's telemetry is healthy. None when the status carries a thermal
+/// failure, because the RPM fields are only meaningful with a clear error slot.
+fn live_fan_readout(status: &comms::ThermalStatus) -> Option<String> {
+    if status.error.is_some() {
+        return None;
+    }
+    Some(format!("CPU {} RPM \u{00B7} GPU {} RPM", status.cpu_rpm, status.gpu_rpm))
+}
+
 fn get_fan_speed(ac: bool) -> Option<i32> {
     let ac = if ac { 1 } else { 0 };
     let response = send_data(comms::DaemonCommand::GetFanSpeed{ ac })?;
@@ -883,9 +905,22 @@ fn create_system_monitor(shared_state: tray::SharedSensorState) -> gtk::Box {
             }
         }
 
+        // Setting (Auto or the fixed target) plus, when the device reports
+        // healthy 0x88 telemetry, the live tachometer values.
+        let live = get_thermal_status().as_ref().and_then(live_fan_readout);
         match fan {
-            Some(0) => { fan_l.set_text("Fan: Auto"); fan_l.set_visible(true); }
-            Some(rpm) => { fan_l.set_text(&format!("Fan: {} RPM", rpm)); fan_l.set_visible(true); }
+            Some(setting) => {
+                let mode_text = if setting == 0 {
+                    "Fan: Auto".to_string()
+                } else {
+                    format!("Fan: {} RPM", setting)
+                };
+                match live {
+                    Some(live) => fan_l.set_text(&format!("{} \u{00B7} {}", mode_text, live)),
+                    None => fan_l.set_text(&mode_text),
+                }
+                fan_l.set_visible(true);
+            }
             None => fan_l.set_visible(false),
         }
 
@@ -1280,6 +1315,13 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
     fan_section.add_row(&fan_slider.container);
     fan_slider.container.set_visible(initial_mode == 1);
 
+    // Live tachometer readout (2025 only: legacy models have no 0x88 telemetry).
+    let tach_row = adw::ActionRow::new();
+    tach_row.set_title("Current Fan Speed");
+    tach_row.set_subtitle("\u{2014}");
+    fan_section.add_row(&tach_row);
+    tach_row.set_visible(is_2025);
+
     // Set the manual-fan slider bounds to the provisional range of a wire mode
     // (2025) or the device's static fan range (other models). The daemon
     // re-validates every fan write, so these bounds are advisory only.
@@ -1320,6 +1362,7 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
         let current_source = current_source.clone();
         let set_fan_bounds = set_fan_bounds.clone();
         let device = device.clone();
+        let tach_row = tach_row.clone();
         Rc::new(move || {
             refreshing.set(true);
             let ac = is_ac.get();
@@ -1358,6 +1401,12 @@ fn make_performance_page(device: SupportedDevice) -> SettingsPage {
                 }
             }
             fan_container.set_visible(mode == 1);
+            if is_2025 {
+                match get_thermal_status().as_ref().and_then(live_fan_readout) {
+                    Some(text) => tach_row.set_subtitle(&text),
+                    None => tach_row.set_subtitle("Telemetry unavailable"),
+                }
+            }
             refreshing.set(false);
         })
     };
@@ -2191,4 +2240,38 @@ fn make_about_page(device: SupportedDevice) -> SettingsPage {
     desc_box.append(&description);
     section.add_row(&desc_box);
     page
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn healthy_status() -> comms::ThermalStatus {
+        comms::ThermalStatus {
+            safety_state: comms::ThermalSafetyStateDto::Ready,
+            performance_mode: 4,
+            fan_mode: comms::FanControlModeDto::Automatic,
+            cpu_rpm: 1900,
+            gpu_rpm: 900,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn live_readout_shows_both_zones_when_telemetry_is_healthy() {
+        assert_eq!(
+            live_fan_readout(&healthy_status()),
+            Some("CPU 1900 RPM \u{00B7} GPU 900 RPM".to_string())
+        );
+    }
+
+    #[test]
+    fn live_readout_is_absent_when_telemetry_failed() {
+        let mut status = healthy_status();
+        status.error = Some(comms::ThermalFailureDto {
+            code: comms::ThermalFailureCode::Transport,
+            message: "poll exhausted".to_string(),
+        });
+        assert_eq!(live_fan_readout(&status), None);
+    }
 }
