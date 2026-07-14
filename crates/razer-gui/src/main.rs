@@ -1,3 +1,5 @@
+#[allow(dead_code)]
+mod daemon;
 mod theme;
 
 use iced::widget::{container, text};
