@@ -178,7 +178,7 @@ fn run_service() {
                     println!("No effects save, creating a new one");
                     if let Ok(mut mgr) = EFFECT_MANAGER.lock() {
                         mgr.push_effect(
-                            kbd::effects::Static::new(vec![0, 255, 0]),
+                            kbd::effects::Static::from_args(vec![0, 255, 0]),
                             [true; 90]
                         );
                     }
@@ -216,11 +216,9 @@ fn run_service() {
     let clean_thread = start_shutdown_task();
 
     if let Some(listener) = razer_core::create() {
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => handle_data(stream),
-                Err(_) => {} // Don't care about this
-            }
+        // Failed connection attempts are deliberately ignored.
+        for stream in listener.incoming().flatten() {
+            handle_data(stream);
         }
     } else {
         eprintln!("Could not create Unix socket!");
@@ -253,13 +251,11 @@ pub fn start_keyboard_animator_task() -> JoinHandle<()> {
     // Start the keyboard animator thread,
     thread::spawn(|| {
         loop {
-            if let Ok(mut dev) = DEV_MANAGER.lock() {
-                if let Some(laptop) = dev.get_device() {
-                    if let Ok(mut mgr) = EFFECT_MANAGER.lock() {
+            if let Ok(mut dev) = DEV_MANAGER.lock()
+                && let Some(laptop) = dev.get_device()
+                    && let Ok(mut mgr) = EFFECT_MANAGER.lock() {
                         mgr.update(laptop);
                     }
-                }
-            }
             thread::sleep(std::time::Duration::from_millis(kbd::ANIMATION_SLEEP_MS));
         }
     })
@@ -283,11 +279,10 @@ fn start_screensaver_monitor_task() -> JoinHandle<()> {
                         d.light_off();
                     }
                 }
-                else if *online == 0 {
-                    if let Ok(mut d) = DEV_MANAGER.lock() {
+                else if *online == 0
+                    && let Ok(mut d) = DEV_MANAGER.lock() {
                         d.restore_light();
                     }
-                }
 
             } 
             true
@@ -320,11 +315,10 @@ fn start_screensaver_monitor_task() -> JoinHandle<()> {
 
         loop { 
             if let Ok(res) = dbus_session.process(time::Duration::from_millis(1000)) {
-                if res {
-                    if let Ok(mut d) = DEV_MANAGER.lock() {
+                if res
+                    && let Ok(mut d) = DEV_MANAGER.lock() {
                         d.add_active_watch(&proxy_idle);
                     }
-                }
                 if let Ok(mut d) = DEV_MANAGER.lock() {
                     d.add_idle_watch(&proxy_idle);
                 }
@@ -437,12 +431,11 @@ fn start_dgpu_resume_watch_task() -> JoinHandle<()> {
             let active = dgpu_path
                 .as_ref()
                 .and_then(|p| std::fs::read_to_string(p.join("power/runtime_status")).ok())
-                .map_or(false, |s| s.trim() == "active");
-            if active && !was_active {
-                if let Ok(mut d) = DEV_MANAGER.lock() {
+                .is_some_and(|s| s.trim() == "active");
+            if active && !was_active
+                && let Ok(mut d) = DEV_MANAGER.lock() {
                     d.relatch_dgpu_boost();
                 }
-            }
             was_active = active;
         }
     })
@@ -592,7 +585,7 @@ pub fn process_client_request(cmd: razer_core::DaemonCommand) -> Option<razer_co
     }
 
     if let Ok(mut d) = DEV_MANAGER.lock() {
-        return match cmd {
+        match cmd {
             razer_core::DaemonCommand::SetPowerMode { ac, pwr, cpu, gpu } if ac < 2 => {
                 Some(razer_core::DaemonResponse::SetPowerMode { result: d.set_power_mode(ac, pwr, cpu, gpu) })
             },
@@ -649,10 +642,10 @@ pub fn process_client_request(cmd: razer_core::DaemonCommand) -> Option<razer_co
                     if let Ok(mut k) = EFFECT_MANAGER.lock() {
                         res = true;
                         let effect = match name.as_str() {
-                            "static" => Some(kbd::effects::Static::new(params)),
-                            "static_gradient" => Some(kbd::effects::StaticGradient::new(params)),
-                            "wave_gradient" => Some(kbd::effects::WaveGradient::new(params)),
-                            "breathing_single" => Some(kbd::effects::BreathSingle::new(params)),
+                            "static" => Some(kbd::effects::Static::from_args(params)),
+                            "static_gradient" => Some(kbd::effects::StaticGradient::from_args(params)),
+                            "wave_gradient" => Some(kbd::effects::WaveGradient::from_args(params)),
+                            "breathing_single" => Some(kbd::effects::BreathSingle::from_args(params)),
                             _ => None
                         };
 
@@ -708,15 +701,15 @@ pub fn process_client_request(cmd: razer_core::DaemonCommand) -> Option<razer_co
                 Some(razer_core::DaemonResponse::SetStandardEffect{result: res})
             }
             razer_core::DaemonCommand::SetBatteryHealthOptimizer { is_on, threshold } => { 
-                return Some(razer_core::DaemonResponse::SetBatteryHealthOptimizer { result: d.set_bho_handler(is_on, threshold)});
+                Some(razer_core::DaemonResponse::SetBatteryHealthOptimizer { result: d.set_bho_handler(is_on, threshold)})
             }
             razer_core::DaemonCommand::GetBatteryHealthOptimizer() => {
-                return d.get_bho_handler().map(|result| 
+                d.get_bho_handler().map(|result| 
                     razer_core::DaemonResponse::GetBatteryHealthOptimizer {
                         is_on: (result.0), 
                         threshold: (result.1) 
                     }
-                );
+                )
             }
             razer_core::DaemonCommand::GetThermalStatus => {
                 Some(razer_core::DaemonResponse::GetThermalStatus { status: d.thermal_status() })
@@ -726,7 +719,7 @@ pub fn process_client_request(cmd: razer_core::DaemonCommand) -> Option<razer_co
                     Some(device) => device.get_name(),
                     None => "Unknown Device".into()
                 };
-                return Some(razer_core::DaemonResponse::GetDeviceName { name });
+                Some(razer_core::DaemonResponse::GetDeviceName { name })
             }
             razer_core::DaemonCommand::GetStandardEffect => {
                 let (effect, params) = d.get_standard_effect();
@@ -737,9 +730,9 @@ pub fn process_client_request(cmd: razer_core::DaemonCommand) -> Option<razer_co
                 eprintln!("Rejected command with invalid ac index: {:?}", cmd);
                 None
             }
-        };
+        }
     } else {
-        return None;
+        None
     }
 }
 

@@ -51,7 +51,7 @@ impl RazerPacket {
     const RAZER_CMD_NOT_SUPPORTED:u8 = 0x05;
 
     fn new(command_class: u8, command_id: u8, data_size: u8) -> RazerPacket {
-        return RazerPacket {
+        RazerPacket {
             report: 0x00,
             status: RazerPacket::RAZER_CMD_NEW,
             id: 0x1F,
@@ -63,7 +63,7 @@ impl RazerPacket {
             args: [0x00; 80],
             crc: 0x00,
             reserved: 0x00,
-        };
+        }
     }
 
     /// Serialize to the 91-byte HID feature report, computing the Razer CRC.
@@ -323,7 +323,7 @@ impl DeviceManager {
     }
 
     pub fn new () -> DeviceManager {
-        return DeviceManager {
+        DeviceManager {
             device: None,
             supported_devices: vec![],
             config: None,
@@ -331,7 +331,7 @@ impl DeviceManager {
             active_id: 0,
             add_active: false,
             change_idle: false,
-        };
+        }
     }
 
     pub fn add_idle_watch(&mut self, proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor) {
@@ -378,7 +378,7 @@ impl DeviceManager {
             }
         }
 
-        return true;
+        true
     }
 
     pub fn get_sync(&mut self) -> bool {
@@ -386,22 +386,21 @@ impl DeviceManager {
             return config.sync;
         }
 
-        return false;
+        false
     }
 
     fn remove_watch(&mut self, proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor) {
-        if let Ok(_) = proxy_idle.remove_watch(self.idle_id) {
+        if proxy_idle.remove_watch(self.idle_id).is_ok() {
             println!("remove idle handler");
         }
     }
 
     pub fn add_active_watch(&mut self, proxy_idle: &dyn dbus_mutter_idlemonitor::OrgGnomeMutterIdleMonitor) {
-        if self.add_active {
-            if let Ok(id) = proxy_idle.add_user_active_watch() {
+        if self.add_active
+            && let Ok(id) = proxy_idle.add_user_active_watch() {
                 println!("active handler {:?}", id);
                 self.active_id = id;
             }
-        }
     }
 
     pub fn read_laptops_file() -> io::Result<DeviceManager > {
@@ -453,7 +452,7 @@ impl DeviceManager {
             return Some(c.power[ac].clone());
         }
 
-        return None;
+        None
     }
 
     pub fn light_off(&mut self) {
@@ -488,7 +487,7 @@ impl DeviceManager {
 
     /// Check whether the current device declares a given feature.
     pub fn device_has_feature(&self, feature: &str) -> bool {
-        self.device.as_ref().map_or(false, |d| d.features.contains(&feature.to_string()))
+        self.device.as_ref().is_some_and(|d| d.features.contains(&feature.to_string()))
     }
 
     pub fn restore_standard_effect(&mut self) {
@@ -505,8 +504,8 @@ impl DeviceManager {
 
     pub fn change_idle(&mut self, ac: usize, timeout: u32) -> bool {
         // let mut arm: bool = false;
-        if let Some(config) = self.get_config() {
-            if config.power[ac].idle != timeout {
+        if let Some(config) = self.get_config()
+            && config.power[ac].idle != timeout {
                 config.power[ac].idle = timeout;
                 if config.sync {
                     let other = (ac + 1) & 0x01;
@@ -518,9 +517,8 @@ impl DeviceManager {
                 // arm = true;
                 self.change_idle = true;
             }
-        }
 
-        return true;
+        true
     }
 
     /// Re-apply (to hardware only, no config write) the saved power mode for the
@@ -668,12 +666,11 @@ impl DeviceManager {
                 if let Some(laptop) = self.get_device() {
                     laptop.set_thermal_safety(transition.state);
                 }
-                if transition.action == Some(thermal::SafetyAction::FailbackBothFans) {
-                    if let Some(laptop) = self.get_device() {
+                if transition.action == Some(thermal::SafetyAction::FailbackBothFans)
+                    && let Some(laptop) = self.get_device() {
                         let report: thermal::FailbackReport = laptop.failback_both_fans();
                         eprintln!("post-wake repair failback to firmware-automatic: {report:?}");
                     }
-                }
                 self.log_hw_power_state("post-wake-repair");
             }
         }
@@ -733,11 +730,10 @@ impl DeviceManager {
     }
 
     pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> razer_core::CommandResult {
-        if self.is_blade_16_2025() {
-            if let Err(policy) = validate_power_request(pwr, cpu, gpu, profile_power_source(ac)) {
+        if self.is_blade_16_2025()
+            && let Err(policy) = validate_power_request(pwr, cpu, gpu, profile_power_source(ac)) {
                 return razer_core::CommandResult::Rejected { reason: policy.to_string() };
             }
-        }
         if let Some(config) = self.get_config() {
             config.power[ac].power_mode = pwr;
             config.power[ac].cpu_boost = cpu;
@@ -767,7 +763,7 @@ impl DeviceManager {
         if let Some(config) = self.get_config() {
             return (config.gui_effect, config.gui_effect_params.clone());
         }
-        return (0, vec![]);
+        (0, vec![])
     }
 
     pub fn save_gui_effect(&mut self, effect_idx: u8, params: Vec<u8>) {
@@ -792,17 +788,15 @@ impl DeviceManager {
             laptop.set_standard_effect(effect_id, params);
         }
 
-        return true;
+        true
     }
 
     pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> razer_core::CommandResult {
-        if self.is_blade_16_2025() {
-            if let Some(profile) = self.get_ac_config(ac) {
-                if let Err(policy) = validate_fan_request(profile.power_mode, rpm) {
+        if self.is_blade_16_2025()
+            && let Some(profile) = self.get_ac_config(ac)
+                && let Err(policy) = validate_fan_request(profile.power_mode, rpm) {
                     return razer_core::CommandResult::Rejected { reason: policy.to_string() };
                 }
-            }
-        }
         if let Some(config) = self.get_config() {
             config.power[ac].fan_rpm = rpm;
             if let Err(e) = config.write_to_file() {
@@ -853,7 +847,7 @@ impl DeviceManager {
             }
         }
 
-        return res;
+        res
     }
 
     pub fn get_logo_led_state(&mut self, ac: usize) -> u8 {
@@ -867,7 +861,7 @@ impl DeviceManager {
             return config.logo_state;
         }
 
-        return 0;
+        0
     }
 
     pub fn set_brightness(&mut self, ac:usize, brightness: u8) -> bool {
@@ -898,7 +892,7 @@ impl DeviceManager {
             }
         }
 
-        return res;
+        res
     }
 
     pub fn get_brightness(&mut self, ac: usize) -> u8 {
@@ -910,7 +904,7 @@ impl DeviceManager {
             return perc as u8;
         }
 
-        return 0
+        0
     }
 
     /// The typed live thermal status carried over IPC. A failed tachometer read
@@ -1025,7 +1019,7 @@ impl DeviceManager {
             return config.fan_rpm;
         }
 
-        return 0;
+        0
     }
 
     pub fn get_power_mode(&mut self, ac:usize) -> u8 {
@@ -1033,7 +1027,7 @@ impl DeviceManager {
             return config.power_mode;
         }
 
-        return 0;
+        0
     }
 
     pub fn get_cpu_boost(&mut self, ac:usize) -> u8 {
@@ -1041,7 +1035,7 @@ impl DeviceManager {
             return config.cpu_boost;
         }
 
-        return 0;
+        0
     }
 
     pub fn get_gpu_boost(&mut self, ac:usize) -> u8 {
@@ -1049,7 +1043,7 @@ impl DeviceManager {
             return config.gpu_boost;
         }
 
-        return 0;
+        0
     }
 
     pub fn set_ac_state(&mut self, ac: bool) {
@@ -1058,13 +1052,11 @@ impl DeviceManager {
         }
         self.change_idle = true;
         let config: Option<config::PowerConfig> = self.get_ac_config(ac as usize);
-        if let Some(config) = config {
-            if let Some(laptop) = self.get_device() {
-                if let Err(error) = laptop.set_config(config) {
+        if let Some(config) = config
+            && let Some(laptop) = self.get_device()
+                && let Err(error) = laptop.set_config(config) {
                     eprintln!("set_ac_state: apply config failed: {error:?}");
                 }
-            }
-        }
     }
 
     pub fn set_ac_state_get(&mut self) {
@@ -1088,11 +1080,10 @@ impl DeviceManager {
                     "set_ac_state_get: UPower online={} applying mode={} cpu={} gpu={}",
                     online, config.power_mode, config.cpu_boost, config.gpu_boost
                 );
-                if let Some(laptop) = self.get_device() {
-                    if let Err(error) = laptop.set_config(config) {
+                if let Some(laptop) = self.get_device()
+                    && let Err(error) = laptop.set_config(config) {
                         eprintln!("set_ac_state_get: apply config failed: {error:?}");
                     }
-                }
             }
         } else {
             eprintln!("set_ac_state_get: UPower online() read failed; no profile applied this pass");
@@ -1163,39 +1154,38 @@ impl DeviceManager {
     /// Whether the discovered device is the Blade 16 2025, which alone runs the
     /// verified thermal application and tachometer monitor.
     pub fn is_blade_16_2025(&mut self) -> bool {
-        self.get_device().map_or(false, |laptop| laptop.pid() == thermal::BLADE_16_2025_PID)
+        self.get_device().is_some_and(|laptop| laptop.pid() == thermal::BLADE_16_2025_PID)
     }
 
     pub fn get_device(&mut self) -> Option<&mut RazerLaptop> {
-        return self.device.as_mut();
+        self.device.as_mut()
     }
 
     pub fn set_bho_handler(&mut self, is_on: bool, threshold: u8) -> bool {
         let result = self.get_device()
-            .map_or(false, |laptop| laptop.set_bho(is_on, threshold));
-        if result {
-            if let Some(config) = self.get_config() {
+            .is_some_and(|laptop| laptop.set_bho(is_on, threshold));
+        if result
+            && let Some(config) = self.get_config() {
                 config.bho_on = is_on;
                 config.bho_threshold = threshold;
                 if let Err(e) = config.write_to_file() {
                     eprintln!("Error write config {:?}", e);
                 }
             }
-        }
-        return result;
+        result
     }
 
     pub fn get_bho_handler(&mut self) -> Option<(bool, u8)> {
         // Check if device supports BHO
         let has_bho = self.get_device()
-            .map_or(false, |laptop| laptop.have_feature("bho".to_string()));
+            .is_some_and(|laptop| laptop.have_feature("bho".to_string()));
         if !has_bho {
             return None;
         }
         if let Some(config) = self.get_config() {
             return Some((config.bho_on, config.bho_threshold));
         }
-        return None;
+        None
     }
 
     pub fn restore_bho(&mut self) {
@@ -1205,15 +1195,14 @@ impl DeviceManager {
                 None => return,
             }
         };
-        if bho_on {
-            if let Some(laptop) = self.get_device() {
+        if bho_on
+            && let Some(laptop) = self.get_device() {
                 laptop.set_bho(bho_on, bho_threshold);
             }
-        }
     }
 
     fn get_config(&mut  self) -> Option<&mut config::Configuration> {
-        return self.config.as_mut();
+        self.config.as_mut()
     }
 
     // pub fn set_device(&mut self, device: RazerLaptop) {
@@ -1407,7 +1396,7 @@ impl RazerLaptop {
     const SEND_POLL_INTERVAL_MS: u64 = 5;
 
     pub fn new(name: String, features: Vec<String>, fan: Vec<u16>, pid: u16, device: hidapi::HidDevice) -> RazerLaptop {
-        return RazerLaptop{
+        RazerLaptop{
             name,
             features,
             fan,
@@ -1420,11 +1409,11 @@ impl RazerLaptop {
             transaction_id: 0,
             thermal_safety: thermal::ThermalSafetyState::Preflight,
             fan_apply_generation: 0,
-        };
+        }
     }
 
     pub fn pid(&self) -> u16 {
-        return self.pid;
+        self.pid
     }
 
     /// Set the live thermal-safety posture from the preflight result.
@@ -1471,19 +1460,19 @@ impl RazerLaptop {
             self.ac_state = 0;
         }
 
-        return  self.ac_state as usize;
+        self.ac_state as usize
     }
 
     pub fn get_ac_state(&mut self) -> usize {
-        return self.ac_state as usize;
+        self.ac_state as usize
     }
 
     pub fn get_name(&self) -> String {
-        return self.name.clone();
+        self.name.clone()
     }
 
     pub fn have_feature(&mut self, fch: String) -> bool {
-        return self.features.contains(&fch);
+        self.features.contains(&fch)
     }
 
     fn clamp_fan(&mut self, rpm: u16) -> u8 {
@@ -1494,7 +1483,7 @@ impl RazerLaptop {
             return (self.fan[0] / 100) as u8;
         }
 
-        return (rpm / 100) as u8;
+        (rpm / 100) as u8
     }
 
     fn clamp_u8(&mut self, value: u8, min: u8, max: u8) ->u8 {
@@ -1505,7 +1494,7 @@ impl RazerLaptop {
             return min;
         }
 
-        return value;
+        value
     }
 
     pub fn set_standard_effect(&mut self, effect_id: u8, params: Vec<u8>) -> bool {
@@ -1513,15 +1502,13 @@ impl RazerLaptop {
         report.args[0] = effect_id; // effect id
         if !params.is_empty() {
             let len = params.len().min(79); // args[0] is effect_id, so max 79 param bytes
-            for idx in 0..len {
-                report.args[idx+1] = params[idx];
-            }
+            report.args[1..(len + 1)].copy_from_slice(&params[..len]);
         }
-        if let Some(_) = self.send_report_logging(report) {
+        if self.send_report_logging(report).is_some() {
             return true;
         }
 
-        return false;
+        false
     }
 
     pub fn set_custom_frame_data(&mut self, row: u8, data: Vec<u8>) {
@@ -1532,9 +1519,7 @@ impl RazerLaptop {
             report.args[1] = row;
             report.args[2] = 0x00; // start col
             report.args[3] = 0x0f; // end col
-            for idx in 0..data.len() {
-                report.args[idx + 7] = data[idx];
-            }
+            report.args[7..(data.len() + 7)].copy_from_slice(&data[..]);
             self.send_report_logging(report);
         }
     }
@@ -1543,11 +1528,11 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x03, 0x0a, 0x02);
         report.args[0] = RazerLaptop::CUSTOMFRAME; // effect id
         report.args[1] = RazerLaptop::NOSTORE;
-        if let Some(_) = self.send_report_logging(report) {
+        if self.send_report_logging(report).is_some() {
             return true;
         }
 
-        return false;
+        false
     }
 
     pub fn get_power_mode(&mut self, zone: u8) -> Result<u8, TransportError> {
@@ -2017,7 +2002,7 @@ impl RazerLaptop {
     #[allow(dead_code)]
     pub fn get_fan_rpm(&mut self) -> u16 {
         let res: u16 = self.fan_rpm as u16;
-        return res * 100;
+        res * 100
     }
 
     /// Read a zone's current tachometer RPM via the profile-1 0x88 builder,
@@ -2052,11 +2037,11 @@ impl RazerLaptop {
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::LOGO_LED;
         report.args[2] = self.clamp_u8(mode, 0x00, 0x01);
-        if let Some(_) = self.send_report_logging(report) {
+        if self.send_report_logging(report).is_some() {
             return true;
         }
 
-        return false;
+        false
     }
 
     #[allow(dead_code)]
@@ -2067,7 +2052,7 @@ impl RazerLaptop {
         if let Some(response) = self.send_report_logging(report){
             return response.args[2];
         }
-        return 0;
+        0
     }
 
     pub fn set_brightness(&mut self, brightness: u8) -> bool {
@@ -2075,11 +2060,11 @@ impl RazerLaptop {
         report.args[0] = RazerLaptop::VARSTORE;
         report.args[1] = RazerLaptop::BACKLIGHT_LED;
         report.args[2] = brightness;
-        if let Some(_) = self.send_report_logging(report) {
+        if self.send_report_logging(report).is_some() {
             return true;
         }
 
-        return false;
+        false
     }
 
     #[allow(dead_code)]
@@ -2091,7 +2076,7 @@ impl RazerLaptop {
         if let Some(response) = self.send_report_logging(report){
             return response.args[2];
         }
-        return 0;
+        0
     }
 
     #[allow(dead_code)]
@@ -2103,8 +2088,8 @@ impl RazerLaptop {
         let mut report: RazerPacket = RazerPacket::new(0x07, 0x92, 0x01);
         report.args[0] = 0x00;
 
-        return self.send_report_logging(report)
-            .map(|resp| resp.args[0]);
+        self.send_report_logging(report)
+            .map(|resp| resp.args[0])
     }
 
     pub fn set_bho(&mut self, is_on: bool, threshold: u8) -> bool {
@@ -2115,12 +2100,12 @@ impl RazerLaptop {
         let mut report = RazerPacket::new(0x07, 0x12, 0x01);
         report.args[0] = bho_to_byte(is_on, threshold);
 
-        return self.send_report_logging(report)
-            .map_or(false, |r| {
+        self.send_report_logging(report)
+            .is_some_and(|r| {
                 println!("Response Packet:\n{:#?}", r); 
                 true
             } 
-        );
+        )
     }
 
     fn next_transaction_id(&mut self) -> u8 {
@@ -2130,7 +2115,7 @@ impl RazerLaptop {
         }
         let id = self.transaction_id;
         self.transaction_id += 1;
-        return id;
+        id
     }
 
     /// Frame a pure `ThermalCommand` into a 0x0d HID report, send it with the
@@ -2365,14 +2350,14 @@ fn thermal_settle_ms(command_class: u8, command_id: u8) -> u64 {
 // bottom bits are the actual threshold that it is set to
 #[allow(dead_code)]
 fn byte_to_bho(u: u8) -> (bool, u8) {
-    return (u & (1 << 7) != 0, (u & 0b0111_1111));
+    (u & (1 << 7) != 0, (u & 0b0111_1111))
 }
 
 fn bho_to_byte(is_on: bool, threshold: u8) -> u8 {
     if is_on {
         return threshold | 0b1000_0000;
     }
-    return threshold;
+    threshold
 }
 
 #[cfg(test)]

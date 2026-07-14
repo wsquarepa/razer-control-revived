@@ -28,8 +28,8 @@ pub struct EffectSave {
 /// keyboard
 #[allow(dead_code)]
 pub trait Effect: Send + Sync {
-    /// Returns a new instance of an Effect
-    fn new(args: Vec<u8>) -> Box<dyn Effect>
+    /// Constructs a boxed instance of the effect from its raw byte arguments
+    fn from_args(args: Vec<u8>) -> Box<dyn Effect>
     where
         Self: Sized;
     /// Updates the keyboard, returning the current state of the keyboard
@@ -63,14 +63,14 @@ unsafe impl Sync for EffectLayer {}
 
 impl EffectLayer {
     fn new(effect: Box<dyn Effect>, mask: [bool; 90]) -> EffectLayer {
-        return EffectLayer {
+        EffectLayer {
             key_mask: mask.to_vec(),
             effect,
-        };
+        }
     }
 
     fn update(&mut self) -> board::KeyboardData {
-        return self.effect.update();
+        self.effect.update()
     }
 
     fn get_save(&mut self) -> Option<serde_json::Value> {
@@ -116,10 +116,10 @@ impl EffectLayer {
         };
 
         let effect: Option<Box<dyn Effect>> = match name.as_str() {
-            "Static" => Some(effects::Static::new(args)),
-            "Wave Gradient" => Some(effects::WaveGradient::new(args)),
-            "Breathing Single" => Some(effects::BreathSingle::new(args)),
-            "Static Gradient" => Some(effects::StaticGradient::new(args)),
+            "Static" => Some(effects::Static::from_args(args)),
+            "Wave Gradient" => Some(effects::WaveGradient::from_args(args)),
+            "Breathing Single" => Some(effects::BreathSingle::from_args(args)),
+            "Static Gradient" => Some(effects::StaticGradient::from_args(args)),
             _ => None,
         };
         match effect {
@@ -208,7 +208,7 @@ impl EffectManager {
                 }
             }
         }
-        return save_json;
+        save_json
     }
 
     pub fn load_from_save(&mut self, mut json: serde_json::Value) {

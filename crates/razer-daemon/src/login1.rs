@@ -17,8 +17,7 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedes
     }
 
     fn get_machine_id(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ())
-            .and_then(|r: (String, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ()).map(|r: (String, )| r.0)
     }
 }
 
@@ -29,8 +28,7 @@ pub trait OrgFreedesktopDBusIntrospectable {
 impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedesktopDBusIntrospectable for blocking::Proxy<'a, C> {
 
     fn introspect(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ())
-            .and_then(|r: (String, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ()).map(|r: (String, )| r.0)
     }
 }
 
@@ -43,13 +41,11 @@ pub trait OrgFreedesktopDBusProperties {
 impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedesktopDBusProperties for blocking::Proxy<'a, C> {
 
     fn get(&self, interface: &str, property: &str) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "Get", (interface, property, ))
-            .and_then(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Properties", "Get", (interface, property, )).map(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>, )| r.0)
     }
 
     fn get_all(&self, interface: &str) -> Result<::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "GetAll", (interface, ))
-            .and_then(|r: (::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Properties", "GetAll", (interface, )).map(|r: (::std::collections::HashMap<String, arg::Variant<Box<dyn arg::RefArg + 'static>>>, )| r.0)
     }
 
     fn set(&self, interface: &str, property: &str, value: arg::Variant<Box<dyn arg::RefArg>>) -> Result<(), dbus::Error> {

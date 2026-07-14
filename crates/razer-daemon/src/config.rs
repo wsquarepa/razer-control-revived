@@ -213,7 +213,7 @@ pub struct PowerConfig {
 
 impl PowerConfig {
     pub fn new() -> PowerConfig {
-        return PowerConfig{
+        PowerConfig{
             power_mode: 0,
             cpu_boost: 1,
             gpu_boost: 0,
@@ -250,7 +250,7 @@ fn default_bho_threshold() -> u8 { 80 }
 
 impl Configuration {
     pub fn new() -> Configuration {
-        return Configuration {
+        Configuration {
             schema_version: CURRENT_SCHEMA_VERSION,
             power: [PowerConfig::new(), PowerConfig::new()],
             sync: false,
@@ -261,7 +261,7 @@ impl Configuration {
             bho_threshold: 80,
             gui_effect: 0,
             gui_effect_params: vec![],
-        };
+        }
     }
 
     /// Serialize first, write a sibling temporary file, then rename: a crash

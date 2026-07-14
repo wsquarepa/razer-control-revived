@@ -53,28 +53,23 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedes
     }
 
     fn get_active(&self) -> Result<bool, dbus::Error> {
-        self.method_call("org.freedesktop.ScreenSaver", "GetActive", ())
-            .and_then(|r: (bool, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.ScreenSaver", "GetActive", ()).map(|r: (bool, )| r.0)
     }
 
     fn get_active_time(&self) -> Result<u32, dbus::Error> {
-        self.method_call("org.freedesktop.ScreenSaver", "GetActiveTime", ())
-            .and_then(|r: (u32, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.ScreenSaver", "GetActiveTime", ()).map(|r: (u32, )| r.0)
     }
 
     fn get_session_idle_time(&self) -> Result<u32, dbus::Error> {
-        self.method_call("org.freedesktop.ScreenSaver", "GetSessionIdleTime", ())
-            .and_then(|r: (u32, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.ScreenSaver", "GetSessionIdleTime", ()).map(|r: (u32, )| r.0)
     }
 
     fn set_active(&self, e_: bool) -> Result<bool, dbus::Error> {
-        self.method_call("org.freedesktop.ScreenSaver", "SetActive", (e_, ))
-            .and_then(|r: (bool, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.ScreenSaver", "SetActive", (e_, )).map(|r: (bool, )| r.0)
     }
 
     fn inhibit(&self, application_name: &str, reason_for_inhibit: &str) -> Result<u32, dbus::Error> {
-        self.method_call("org.freedesktop.ScreenSaver", "Inhibit", (application_name, reason_for_inhibit, ))
-            .and_then(|r: (u32, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.ScreenSaver", "Inhibit", (application_name, reason_for_inhibit, )).map(|r: (u32, )| r.0)
     }
 
     fn un_inhibit(&self, cookie: u32) -> Result<(), dbus::Error> {
@@ -82,8 +77,7 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedes
     }
 
     fn throttle(&self, application_name: &str, reason_for_inhibit: &str) -> Result<u32, dbus::Error> {
-        self.method_call("org.freedesktop.ScreenSaver", "Throttle", (application_name, reason_for_inhibit, ))
-            .and_then(|r: (u32, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.ScreenSaver", "Throttle", (application_name, reason_for_inhibit, )).map(|r: (u32, )| r.0)
     }
 
     fn un_throttle(&self, cookie: u32) -> Result<(), dbus::Error> {
@@ -167,8 +161,7 @@ impl dbus::message::SignalArgs for OrgFreedesktopDBusPropertiesPropertiesChanged
 impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedesktopDBusProperties for blocking::Proxy<'a, C> {
 
     fn get(&self, interface_name: &str, property_name: &str) -> Result<arg::Variant<Box<dyn arg::RefArg + 'static>>, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "Get", (interface_name, property_name, ))
-            .and_then(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Properties", "Get", (interface_name, property_name, )).map(|r: (arg::Variant<Box<dyn arg::RefArg + 'static>>, )| r.0)
     }
 
     fn set(&self, interface_name: &str, property_name: &str, value: arg::Variant<Box<dyn arg::RefArg>>) -> Result<(), dbus::Error> {
@@ -176,8 +169,7 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedes
     }
 
     fn get_all(&self, interface_name: &str) -> Result<arg::PropMap, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Properties", "GetAll", (interface_name, ))
-            .and_then(|r: (arg::PropMap, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Properties", "GetAll", (interface_name, )).map(|r: (arg::PropMap, )| r.0)
     }
 }
 
@@ -188,8 +180,7 @@ pub trait OrgFreedesktopDBusIntrospectable {
 impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedesktopDBusIntrospectable for blocking::Proxy<'a, C> {
 
     fn introspect(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ())
-            .and_then(|r: (String, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Introspectable", "Introspect", ()).map(|r: (String, )| r.0)
     }
 }
 
@@ -205,7 +196,6 @@ impl<'a, T: blocking::BlockingSender, C: ::std::ops::Deref<Target=T>> OrgFreedes
     }
 
     fn get_machine_id(&self) -> Result<String, dbus::Error> {
-        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ())
-            .and_then(|r: (String, )| Ok(r.0, ))
+        self.method_call("org.freedesktop.DBus.Peer", "GetMachineId", ()).map(|r: (String, )| r.0)
     }
 }

@@ -483,7 +483,7 @@ fn bho_toggle_on(threshold: u8) {
 
     send_data(razer_core::DaemonCommand::SetBatteryHealthOptimizer {
         is_on: true,
-        threshold: threshold,
+        threshold,
     })
     .map_or_else(
         || eprintln!("Unknown error occured when toggling bho"),
@@ -506,15 +506,7 @@ fn bho_toggle_on(threshold: u8) {
 }
 
 fn valid_bho_threshold(threshold: u8) -> bool {
-    if threshold % 5 != 0 {
-        return false;
-    }
-
-    if threshold < 50 || threshold > 80 {
-        return false;
-    }
-
-    return true;
+    threshold.is_multiple_of(5) && (50..=80).contains(&threshold)
 }
 
 fn bho_toggle_off() {
@@ -659,16 +651,14 @@ fn read_power_mode(ac: usize) {
             // Stable KDE-widget contract: `Name (N)` with the wire number in parens.
             println!("Current power setting: {}", razer_core::performance_mode_display(pwr));
             if pwr == 4 {
-                if let Some(resp) = send_data(razer_core::DaemonCommand::GetCPUBoost { ac }) {
-                    if let razer_core::DaemonResponse::GetCPUBoost { cpu } = resp {
+                if let Some(resp) = send_data(razer_core::DaemonCommand::GetCPUBoost { ac })
+                    && let razer_core::DaemonResponse::GetCPUBoost { cpu } = resp {
                         println!("Current CPU setting: {}", boost_level_label(cpu));
                     };
-                }
-                if let Some(resp) = send_data(razer_core::DaemonCommand::GetGPUBoost { ac }) {
-                    if let razer_core::DaemonResponse::GetGPUBoost { gpu } = resp {
+                if let Some(resp) = send_data(razer_core::DaemonCommand::GetGPUBoost { ac })
+                    && let razer_core::DaemonResponse::GetGPUBoost { gpu } = resp {
                         println!("Current GPU setting: {}", boost_level_label(gpu));
                     };
-                }
             }
         } else {
             eprintln!("Daemon responded with invalid data!");
