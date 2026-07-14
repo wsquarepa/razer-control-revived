@@ -8,7 +8,6 @@ use crate::dbus_mutter_idlemonitor;
 use crate::config;
 use crate::battery;
 use crate::thermal;
-use crate::comms;
 use dbus::blocking::Connection;
 
 const RAZER_VENDOR_ID: u16 = 0x1532;
@@ -240,26 +239,26 @@ fn validate_fan_request(pwr: u8, rpm: i32) -> Result<(), thermal::ThermalPolicyE
 }
 
 /// Project a verified-apply/telemetry failure onto the typed IPC failure DTO.
-fn thermal_failure_dto(error: &ThermalError) -> comms::ThermalFailureDto {
+fn thermal_failure_dto(error: &ThermalError) -> razer_core::ThermalFailureDto {
     let code = match error {
         ThermalError::Decode(_) | ThermalError::ReadbackMismatch { .. } => {
-            comms::ThermalFailureCode::ReadbackMismatch
+            razer_core::ThermalFailureCode::ReadbackMismatch
         }
-        ThermalError::Policy(_) => comms::ThermalFailureCode::Policy,
-        ThermalError::WritesDisabled => comms::ThermalFailureCode::WritesDisabled,
-        ThermalError::Transport(_) => comms::ThermalFailureCode::Transport,
+        ThermalError::Policy(_) => razer_core::ThermalFailureCode::Policy,
+        ThermalError::WritesDisabled => razer_core::ThermalFailureCode::WritesDisabled,
+        ThermalError::Transport(_) => razer_core::ThermalFailureCode::Transport,
     };
-    comms::ThermalFailureDto { code, message: thermal_error_reason(error) }
+    razer_core::ThermalFailureDto { code, message: thermal_error_reason(error) }
 }
 
 /// Project the daemon's internal safety posture onto the frontend DTO, dropping
 /// the target RPM and failure counter a frontend does not consume.
-fn safety_state_dto(state: thermal::ThermalSafetyState) -> comms::ThermalSafetyStateDto {
+fn safety_state_dto(state: thermal::ThermalSafetyState) -> razer_core::ThermalSafetyStateDto {
     match state {
-        thermal::ThermalSafetyState::Preflight => comms::ThermalSafetyStateDto::Preflight,
-        thermal::ThermalSafetyState::Ready => comms::ThermalSafetyStateDto::Ready,
-        thermal::ThermalSafetyState::Manual { .. } => comms::ThermalSafetyStateDto::Manual,
-        thermal::ThermalSafetyState::Disabled => comms::ThermalSafetyStateDto::Disabled,
+        thermal::ThermalSafetyState::Preflight => razer_core::ThermalSafetyStateDto::Preflight,
+        thermal::ThermalSafetyState::Ready => razer_core::ThermalSafetyStateDto::Ready,
+        thermal::ThermalSafetyState::Manual { .. } => razer_core::ThermalSafetyStateDto::Manual,
+        thermal::ThermalSafetyState::Disabled => razer_core::ThermalSafetyStateDto::Disabled,
     }
 }
 
@@ -733,10 +732,10 @@ impl DeviceManager {
         }
     }
 
-    pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> comms::CommandResult {
+    pub fn set_power_mode(&mut self, ac: usize, pwr: u8, cpu: u8, gpu: u8) -> razer_core::CommandResult {
         if self.is_blade_16_2025() {
             if let Err(policy) = validate_power_request(pwr, cpu, gpu, profile_power_source(ac)) {
-                return comms::CommandResult::Rejected { reason: policy.to_string() };
+                return razer_core::CommandResult::Rejected { reason: policy.to_string() };
             }
         }
         if let Some(config) = self.get_config() {
@@ -751,17 +750,17 @@ impl DeviceManager {
             // Writing the inactive profile only stores config; there is nothing to
             // apply to hardware until that profile becomes active.
             if laptop.get_ac_state() != ac {
-                return comms::CommandResult::Applied;
+                return razer_core::CommandResult::Applied;
             }
             return match laptop.set_power_mode(pwr, cpu, gpu) {
-                Ok(()) => comms::CommandResult::Applied,
+                Ok(()) => razer_core::CommandResult::Applied,
                 Err(error) => {
                     eprintln!("set_power_mode failed: {error:?}");
-                    comms::CommandResult::Rejected { reason: thermal_error_reason(&error) }
+                    razer_core::CommandResult::Rejected { reason: thermal_error_reason(&error) }
                 }
             };
         }
-        comms::CommandResult::Rejected { reason: "no supported device present".to_string() }
+        razer_core::CommandResult::Rejected { reason: "no supported device present".to_string() }
     }
 
     pub fn get_standard_effect(&mut self) -> (u8, Vec<u8>) {
@@ -796,11 +795,11 @@ impl DeviceManager {
         return true;
     }
 
-    pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> comms::CommandResult {
+    pub fn set_fan_rpm(&mut self, ac:usize, rpm: i32) -> razer_core::CommandResult {
         if self.is_blade_16_2025() {
             if let Some(profile) = self.get_ac_config(ac) {
                 if let Err(policy) = validate_fan_request(profile.power_mode, rpm) {
-                    return comms::CommandResult::Rejected { reason: policy.to_string() };
+                    return razer_core::CommandResult::Rejected { reason: policy.to_string() };
                 }
             }
         }
@@ -815,17 +814,17 @@ impl DeviceManager {
             // Writing the inactive profile only stores config; there is nothing to
             // apply to hardware until that profile becomes active.
             if laptop.get_ac_state() != ac {
-                return comms::CommandResult::Applied;
+                return razer_core::CommandResult::Applied;
             }
             return match laptop.set_fan_rpm(rpm) {
-                Ok(()) => comms::CommandResult::Applied,
+                Ok(()) => razer_core::CommandResult::Applied,
                 Err(error) => {
                     eprintln!("set_fan_rpm failed: {error:?}");
-                    comms::CommandResult::Rejected { reason: thermal_error_reason(&error) }
+                    razer_core::CommandResult::Rejected { reason: thermal_error_reason(&error) }
                 }
             };
         }
-        comms::CommandResult::Rejected { reason: "no supported device present".to_string() }
+        razer_core::CommandResult::Rejected { reason: "no supported device present".to_string() }
     }
 
     pub fn set_logo_led_state(&mut self, ac:usize, logo_state: u8) -> bool {
@@ -918,7 +917,7 @@ impl DeviceManager {
     /// surfaces `error` and leaves the rpm fields unspecified: it never converts a
     /// transport failure into a valid zero reading (the old i32 zero sentinel is
     /// gone from this path).
-    pub fn thermal_status(&mut self) -> comms::ThermalStatus {
+    pub fn thermal_status(&mut self) -> razer_core::ThermalStatus {
         let (ac, is_2025, safety) = match self.get_device() {
             Some(laptop) => (
                 laptop.get_ac_state(),
@@ -926,14 +925,14 @@ impl DeviceManager {
                 laptop.thermal_safety(),
             ),
             None => {
-                return comms::ThermalStatus {
-                    safety_state: comms::ThermalSafetyStateDto::Disabled,
+                return razer_core::ThermalStatus {
+                    safety_state: razer_core::ThermalSafetyStateDto::Disabled,
                     performance_mode: 0,
-                    fan_mode: comms::FanControlModeDto::Automatic,
+                    fan_mode: razer_core::FanControlModeDto::Automatic,
                     cpu_rpm: 0,
                     gpu_rpm: 0,
-                    error: Some(comms::ThermalFailureDto {
-                        code: comms::ThermalFailureCode::Transport,
+                    error: Some(razer_core::ThermalFailureDto {
+                        code: razer_core::ThermalFailureCode::Transport,
                         message: "no supported device present".to_string(),
                     }),
                 };
@@ -943,16 +942,16 @@ impl DeviceManager {
             Some(config) => (
                 config.power_mode,
                 if config.fan_rpm == 0 {
-                    comms::FanControlModeDto::Automatic
+                    razer_core::FanControlModeDto::Automatic
                 } else {
-                    comms::FanControlModeDto::Fixed
+                    razer_core::FanControlModeDto::Fixed
                 },
             ),
-            None => (0, comms::FanControlModeDto::Automatic),
+            None => (0, razer_core::FanControlModeDto::Automatic),
         };
-        let safety_state: comms::ThermalSafetyStateDto = safety_state_dto(safety);
+        let safety_state: razer_core::ThermalSafetyStateDto = safety_state_dto(safety);
         match self.read_zone_rpms(is_2025) {
-            Ok((cpu_rpm, gpu_rpm)) => comms::ThermalStatus {
+            Ok((cpu_rpm, gpu_rpm)) => razer_core::ThermalStatus {
                 safety_state,
                 performance_mode,
                 fan_mode,
@@ -962,7 +961,7 @@ impl DeviceManager {
             },
             Err(error) => {
                 eprintln!("thermal_status: fan telemetry read failed: {error:?}");
-                comms::ThermalStatus {
+                razer_core::ThermalStatus {
                     safety_state,
                     performance_mode,
                     fan_mode,

@@ -11,8 +11,6 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 use dbus::blocking::Connection;
 use dbus::{Message, arg};
 
-#[path = "../comms.rs"]
-mod comms;
 mod config;
 mod kbd;
 mod device;
@@ -217,7 +215,7 @@ fn run_service() {
     }
     let clean_thread = start_shutdown_task();
 
-    if let Some(listener) = comms::create() {
+    if let Some(listener) = razer_core::create() {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => handle_data(stream),
@@ -236,7 +234,7 @@ fn setup_panic_hook() {
     let default_panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         error!("Something went wrong! Removing the socket path");
-        let _ = std::fs::remove_file(comms::socket_path());
+        let _ = std::fs::remove_file(razer_core::socket_path());
         default_panic_hook(info);
     }));
 }
@@ -528,7 +526,7 @@ pub fn start_shutdown_task() -> JoinHandle<()> {
         if let Err(error) = config::Configuration::write_effects_save(json) {
             error!("Error writing config {}", error);
         }
-        let _ = std::fs::remove_file(comms::socket_path());
+        let _ = std::fs::remove_file(razer_core::socket_path());
         std::process::exit(0);
     })
 }
@@ -545,7 +543,7 @@ fn handle_data(mut stream: UnixStream) {
         return;
     }
 
-    if let Some(cmd) = comms::read_from_socket_req(&buffer) {
+    if let Some(cmd) = razer_core::read_from_socket_req(&buffer) {
         if let Some(s) = process_client_request(cmd) {
             if let Ok(x) = bincode::serialize(&s) {
                 let result = stream.write_all(&x);
@@ -562,10 +560,10 @@ fn handle_data(mut stream: UnixStream) {
     }
 }
 
-pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::DaemonResponse> {
+pub fn process_client_request(cmd: razer_core::DaemonCommand) -> Option<razer_core::DaemonResponse> {
     // GPU commands don't need DEV_MANAGER, handle them first
     match &cmd {
-        comms::DaemonCommand::GetGpuStatus => {
+        razer_core::DaemonCommand::GetGpuStatus => {
             let gpus = gpu::discover_gpus();
             let dgpu_rpm = gpu::get_dgpu_runtime_pm();
             let ec_available = gpu::envycontrol_available();
@@ -574,52 +572,52 @@ pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::Daemon
             } else {
                 "unknown".to_string()
             };
-            return Some(comms::DaemonResponse::GetGpuStatus {
+            return Some(razer_core::DaemonResponse::GetGpuStatus {
                 gpus,
                 dgpu_runtime_pm: dgpu_rpm,
                 envycontrol_mode: ec_mode,
                 envycontrol_available: ec_available,
             });
         }
-        comms::DaemonCommand::SetDgpuRuntimePM { enabled } => {
-            return Some(comms::DaemonResponse::SetDgpuRuntimePM {
+        razer_core::DaemonCommand::SetDgpuRuntimePM { enabled } => {
+            return Some(razer_core::DaemonResponse::SetDgpuRuntimePM {
                 result: gpu::set_dgpu_runtime_pm(*enabled),
             });
         }
-        comms::DaemonCommand::SetGpuMode { mode } => {
+        razer_core::DaemonCommand::SetGpuMode { mode } => {
             let (ok, msg) = gpu::set_envycontrol_mode(mode);
-            return Some(comms::DaemonResponse::SetGpuMode { result: ok, message: msg });
+            return Some(razer_core::DaemonResponse::SetGpuMode { result: ok, message: msg });
         }
         _ => {}
     }
 
     if let Ok(mut d) = DEV_MANAGER.lock() {
         return match cmd {
-            comms::DaemonCommand::SetPowerMode { ac, pwr, cpu, gpu } if ac < 2 => {
-                Some(comms::DaemonResponse::SetPowerMode { result: d.set_power_mode(ac, pwr, cpu, gpu) })
+            razer_core::DaemonCommand::SetPowerMode { ac, pwr, cpu, gpu } if ac < 2 => {
+                Some(razer_core::DaemonResponse::SetPowerMode { result: d.set_power_mode(ac, pwr, cpu, gpu) })
             },
-            comms::DaemonCommand::SetFanSpeed { ac, rpm } if ac < 2 => {
-                Some(comms::DaemonResponse::SetFanSpeed { result: d.set_fan_rpm(ac, rpm) })
+            razer_core::DaemonCommand::SetFanSpeed { ac, rpm } if ac < 2 => {
+                Some(razer_core::DaemonResponse::SetFanSpeed { result: d.set_fan_rpm(ac, rpm) })
             },
-            comms::DaemonCommand::SetLogoLedState{ ac, logo_state } if ac < 2 => {
-                Some(comms::DaemonResponse::SetLogoLedState { result: d.set_logo_led_state(ac, logo_state) })
+            razer_core::DaemonCommand::SetLogoLedState{ ac, logo_state } if ac < 2 => {
+                Some(razer_core::DaemonResponse::SetLogoLedState { result: d.set_logo_led_state(ac, logo_state) })
             },
-            comms::DaemonCommand::SetBrightness { ac, val } if ac < 2 => {
-                Some(comms::DaemonResponse::SetBrightness {result: d.set_brightness(ac, val) })
+            razer_core::DaemonCommand::SetBrightness { ac, val } if ac < 2 => {
+                Some(razer_core::DaemonResponse::SetBrightness {result: d.set_brightness(ac, val) })
             }
-            comms::DaemonCommand::SetIdle { ac, val } if ac < 2 => {
-                Some(comms::DaemonResponse::SetIdle { result: d.change_idle(ac, val) })
+            razer_core::DaemonCommand::SetIdle { ac, val } if ac < 2 => {
+                Some(razer_core::DaemonResponse::SetIdle { result: d.change_idle(ac, val) })
             }
-            comms::DaemonCommand::SetSync { sync } => {
-                Some(comms::DaemonResponse::SetSync { result: d.set_sync(sync) })
+            razer_core::DaemonCommand::SetSync { sync } => {
+                Some(razer_core::DaemonResponse::SetSync { result: d.set_sync(sync) })
             }
-            comms::DaemonCommand::GetBrightness{ac} if ac < 2 =>  {
-                Some(comms::DaemonResponse::GetBrightness { result: d.get_brightness(ac)})
+            razer_core::DaemonCommand::GetBrightness{ac} if ac < 2 =>  {
+                Some(razer_core::DaemonResponse::GetBrightness { result: d.get_brightness(ac)})
             },
-            comms::DaemonCommand::GetLogoLedState{ac} if ac < 2 => Some(comms::DaemonResponse::GetLogoLedState {logo_state: d.get_logo_led_state(ac) }),
-            comms::DaemonCommand::GetKeyboardRGB { layer } => {
+            razer_core::DaemonCommand::GetLogoLedState{ac} if ac < 2 => Some(razer_core::DaemonResponse::GetLogoLedState {logo_state: d.get_logo_led_state(ac) }),
+            razer_core::DaemonCommand::GetKeyboardRGB { layer } => {
                 if let Ok(mut mgr) = EFFECT_MANAGER.lock() {
-                    Some(comms::DaemonResponse::GetKeyboardRGB {
+                    Some(razer_core::DaemonResponse::GetKeyboardRGB {
                         layer,
                         rgbdata: mgr.get_map(layer),
                     })
@@ -627,12 +625,12 @@ pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::Daemon
                     None
                 }
             }
-            comms::DaemonCommand::GetSync() => Some(comms::DaemonResponse::GetSync { sync: d.get_sync() }),
-            comms::DaemonCommand::GetFanSpeed{ac} if ac < 2 => Some(comms::DaemonResponse::GetFanSpeed { rpm: d.get_fan_rpm(ac)}),
-            comms::DaemonCommand::GetPwrLevel{ac} if ac < 2 => Some(comms::DaemonResponse::GetPwrLevel { pwr: d.get_power_mode(ac) }),
-            comms::DaemonCommand::GetCPUBoost{ac} if ac < 2 => Some(comms::DaemonResponse::GetCPUBoost { cpu: d.get_cpu_boost(ac) }),
-            comms::DaemonCommand::GetGPUBoost{ac} if ac < 2 => Some(comms::DaemonResponse::GetGPUBoost { gpu: d.get_gpu_boost(ac) }),
-            comms::DaemonCommand::SetEffect{ name, params } => {
+            razer_core::DaemonCommand::GetSync() => Some(razer_core::DaemonResponse::GetSync { sync: d.get_sync() }),
+            razer_core::DaemonCommand::GetFanSpeed{ac} if ac < 2 => Some(razer_core::DaemonResponse::GetFanSpeed { rpm: d.get_fan_rpm(ac)}),
+            razer_core::DaemonCommand::GetPwrLevel{ac} if ac < 2 => Some(razer_core::DaemonResponse::GetPwrLevel { pwr: d.get_power_mode(ac) }),
+            razer_core::DaemonCommand::GetCPUBoost{ac} if ac < 2 => Some(razer_core::DaemonResponse::GetCPUBoost { cpu: d.get_cpu_boost(ac) }),
+            razer_core::DaemonCommand::GetGPUBoost{ac} if ac < 2 => Some(razer_core::DaemonResponse::GetGPUBoost { gpu: d.get_gpu_boost(ac) }),
+            razer_core::DaemonCommand::SetEffect{ name, params } => {
                 let mut res = false;
                 let gui_idx = match name.as_str() {
                     "static" => 0u8,
@@ -683,10 +681,10 @@ pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::Daemon
                     };
                     res = d.set_standard_effect(effect_id, hw_params);
                 }
-                Some(comms::DaemonResponse::SetEffect{result: res})
+                Some(razer_core::DaemonResponse::SetEffect{result: res})
             }
 
-            comms::DaemonCommand::SetStandardEffect{ name, params } => {
+            razer_core::DaemonCommand::SetStandardEffect{ name, params } => {
                 // TODO save standart effect may be struct ?
                 let mut res = false;
                 if let Some(laptop) = d.get_device() {
@@ -707,32 +705,32 @@ pub fn process_client_request(cmd: comms::DaemonCommand) -> Option<comms::Daemon
                 } else {
                     res = false;
                 }
-                Some(comms::DaemonResponse::SetStandardEffect{result: res})
+                Some(razer_core::DaemonResponse::SetStandardEffect{result: res})
             }
-            comms::DaemonCommand::SetBatteryHealthOptimizer { is_on, threshold } => { 
-                return Some(comms::DaemonResponse::SetBatteryHealthOptimizer { result: d.set_bho_handler(is_on, threshold)});
+            razer_core::DaemonCommand::SetBatteryHealthOptimizer { is_on, threshold } => { 
+                return Some(razer_core::DaemonResponse::SetBatteryHealthOptimizer { result: d.set_bho_handler(is_on, threshold)});
             }
-            comms::DaemonCommand::GetBatteryHealthOptimizer() => {
+            razer_core::DaemonCommand::GetBatteryHealthOptimizer() => {
                 return d.get_bho_handler().map(|result| 
-                    comms::DaemonResponse::GetBatteryHealthOptimizer {
+                    razer_core::DaemonResponse::GetBatteryHealthOptimizer {
                         is_on: (result.0), 
                         threshold: (result.1) 
                     }
                 );
             }
-            comms::DaemonCommand::GetThermalStatus => {
-                Some(comms::DaemonResponse::GetThermalStatus { status: d.thermal_status() })
+            razer_core::DaemonCommand::GetThermalStatus => {
+                Some(razer_core::DaemonResponse::GetThermalStatus { status: d.thermal_status() })
             },
-            comms::DaemonCommand::GetDeviceName => {
+            razer_core::DaemonCommand::GetDeviceName => {
                 let name = match &d.device {
                     Some(device) => device.get_name(),
                     None => "Unknown Device".into()
                 };
-                return Some(comms::DaemonResponse::GetDeviceName { name });
+                return Some(razer_core::DaemonResponse::GetDeviceName { name });
             }
-            comms::DaemonCommand::GetStandardEffect => {
+            razer_core::DaemonCommand::GetStandardEffect => {
                 let (effect, params) = d.get_standard_effect();
-                Some(comms::DaemonResponse::GetStandardEffect { effect, params })
+                Some(razer_core::DaemonResponse::GetStandardEffect { effect, params })
             }
             // Reject commands with invalid ac index (>= 2)
             _ => {

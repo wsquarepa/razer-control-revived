@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn migrates_complete_legacy_fixture() {
         let legacy: Configuration =
-            serde_json::from_str(include_str!("../../testdata/legacy-02c6-config.json")).unwrap();
+            serde_json::from_str(include_str!("../testdata/legacy-02c6-config.json")).unwrap();
         let outcome: MigrationOutcome =
             migrate_for_pid(legacy, thermal::BLADE_16_2025_PID).unwrap();
         assert_eq!(outcome.configuration.power[0].power_mode, 6);

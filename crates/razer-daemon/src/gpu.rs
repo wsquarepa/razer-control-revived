@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use super::comms::GpuInfo;
+use razer_core::GpuInfo;
 
 /// Known GPU vendor IDs
 const VENDOR_NVIDIA: &str = "0x10de";
