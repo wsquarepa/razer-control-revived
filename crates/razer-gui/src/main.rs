@@ -104,6 +104,7 @@ enum Message {
     Status(String),
     StatusExpired,
     About(pages::about::Message),
+    Telemetry(telemetry::Snapshot),
 }
 
 enum Connection {
@@ -117,6 +118,7 @@ struct App {
     page: Page,
     connection: Connection,
     status: Option<String>,
+    telemetry: telemetry::Snapshot,
 }
 
 fn bootstrap() -> Task<Message> {
@@ -151,6 +153,7 @@ impl App {
             page: Page::Overview,
             connection: Connection::Connecting,
             status: None,
+            telemetry: telemetry::Snapshot::EMPTY,
         };
         (app, Task::batch([open_window(), bootstrap()]))
     }
@@ -164,7 +167,10 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        window::close_requests().map(Message::CloseRequested)
+        Subscription::batch([
+            window::close_requests().map(Message::CloseRequested),
+            telemetry::subscription().map(Message::Telemetry),
+        ])
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -206,6 +212,10 @@ impl App {
             }
             Message::About(message) => {
                 pages::about::update(message);
+                Task::none()
+            }
+            Message::Telemetry(snapshot) => {
+                self.telemetry = snapshot;
                 Task::none()
             }
         }

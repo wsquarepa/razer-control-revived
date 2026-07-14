@@ -268,6 +268,41 @@ impl Sampler {
     }
 }
 
+use iced::Subscription;
+use iced::futures::{SinkExt, Stream};
+
+fn snapshot_stream() -> impl Stream<Item = Snapshot> {
+    iced::stream::channel(1, async |mut out| {
+        let mut sampler = Sampler::new();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let include_load = WINDOW_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
+            let (returned_sampler, snapshot) = tokio::task::spawn_blocking(move || {
+                let mut snapshot = sampler.sample(include_load);
+                snapshot.thermal = match crate::daemon::thermal_status() {
+                    Ok(status) => Some(status),
+                    Err(error) => {
+                        log::warn!("thermal telemetry unavailable: {error}");
+                        None
+                    }
+                };
+                (sampler, snapshot)
+            })
+            .await
+            .expect("telemetry sampling task panicked");
+            sampler = returned_sampler;
+            *SHARED.lock().expect("telemetry snapshot lock") = snapshot.clone();
+            if out.send(snapshot).await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
+pub fn subscription() -> Subscription<Snapshot> {
+    Subscription::run(snapshot_stream)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
