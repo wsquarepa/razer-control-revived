@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- The settings GUI is back as `razer-gui`: an Iced-based neon dashboard with an
+  Overview telemetry grid (CPU/GPU usage, watts, fans, temps), the full
+  performance/GPU/lighting/battery feature set from the GTK app, and a
+  status-notifier tray. Packaging integration is still pending.
+
 ## 0.3.0-rc1 (2026-03-27)
 
 ### Bug Fixes

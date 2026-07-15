@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Razer Control
+Comment=Performance, cooling, lighting, and battery settings for Razer laptops
+Exec=razer-gui
+Icon=razer-gui
+Terminal=false
+Categories=Settings;HardwareSettings;
