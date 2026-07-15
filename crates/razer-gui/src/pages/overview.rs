@@ -77,6 +77,18 @@ pub fn update(message: Message) -> Task<Message> {
     }
 }
 
+/// Tachometer display scale: zero to the mode's manual-set maximum. The
+/// manual-set MINIMUM must not bound the display: idle fans spin well below
+/// it (or are stopped at 0 rpm), which would render an empty arc under a
+/// min-based scale.
+pub fn fan_display_max(is_2025: bool, performance_mode: u8, device_range: (u16, u16)) -> u16 {
+    if is_2025 {
+        razer_core::provisional_rpm_range(performance_mode).1
+    } else {
+        device_range.1
+    }
+}
+
 fn cards<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Vec<Element<'a, Message>> {
     let gpu = snapshot.gpu.as_ref();
     let gpu_unit = |unit: &str| {
@@ -87,15 +99,15 @@ fn cards<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Vec<Elem
         }
     };
     let thermal = snapshot.thermal.as_ref().filter(|t| t.error.is_none());
-    let fan_range = if capabilities.is_2025 {
-        thermal.map(|t| razer_core::provisional_rpm_range(t.performance_mode))
+    let fan_max = if capabilities.is_2025 {
+        thermal.map(|t| fan_display_max(true, t.performance_mode, capabilities.fan_range))
     } else {
-        Some(capabilities.fan_range)
+        Some(fan_display_max(false, 0, capabilities.fan_range))
     };
     let fan_gauge = |rpm: Option<u16>| Gauge {
-        fraction: rpm.zip(fan_range).map(|(rpm, (min, max))| {
-            gauge_fraction(f32::from(rpm), f32::from(min), f32::from(max))
-        }),
+        fraction: rpm
+            .zip(fan_max)
+            .map(|(rpm, max)| gauge_fraction(f32::from(rpm), 0.0, f32::from(max))),
         value: rpm.map_or_else(String::new, |r| r.to_string()),
         unit: "RPM".to_string(),
         warm: false,
@@ -246,5 +258,15 @@ mod tests {
         let legacy: Vec<u8> = mode_choices(false, true).iter().map(|c| c.wire).collect();
         assert_eq!(legacy, vec![0, 1, 2, 3, 4]);
         assert_eq!(mode_choices(false, true), mode_choices(false, false));
+    }
+
+    #[test]
+    fn fan_display_max_scales_from_zero_to_the_mode_maximum() {
+        assert_eq!(fan_display_max(true, 0, (0, 0)), 5200);
+        assert_eq!(fan_display_max(true, 2, (0, 0)), 5400);
+        assert_eq!(fan_display_max(false, 0, (3500, 5000)), 5000);
+        // idle fans (~2100 rpm) must land in the lower part of the arc, not at 0
+        let fraction = gauge_fraction(2100.0, 0.0, 5200.0);
+        assert!((0.3..0.5).contains(&fraction), "got {fraction}");
     }
 }
