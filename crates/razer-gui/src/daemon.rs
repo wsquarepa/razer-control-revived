@@ -116,12 +116,12 @@ expect_variant!(expect_gpu_boost, GetGPUBoost { gpu } => u8);
 expect_variant!(expect_set_power, SetPowerMode { result } => CommandResult);
 expect_variant!(expect_fan_speed, GetFanSpeed { rpm } => i32);
 expect_variant!(expect_set_fan, SetFanSpeed { result } => CommandResult);
-expect_variant!(expect_brightness, GetBrightness { result } => u8);
-expect_variant!(expect_set_brightness, SetBrightness { result } => bool);
-expect_variant!(expect_logo, GetLogoLedState { logo_state } => u8);
-expect_variant!(expect_set_logo, SetLogoLedState { result } => bool);
-expect_variant!(expect_standard_effect, GetStandardEffect { effect, params } => (u8, Vec<u8>));
-expect_variant!(expect_set_effect, SetEffect { result } => bool);
+expect_variant!(live expect_brightness, GetBrightness { result } => u8);
+expect_variant!(live expect_set_brightness, SetBrightness { result } => bool);
+expect_variant!(live expect_logo, GetLogoLedState { logo_state } => u8);
+expect_variant!(live expect_set_logo, SetLogoLedState { result } => bool);
+expect_variant!(live expect_standard_effect, GetStandardEffect { effect, params } => (u8, Vec<u8>));
+expect_variant!(live expect_set_effect, SetEffect { result } => bool);
 expect_variant!(expect_bho, GetBatteryHealthOptimizer { is_on, threshold } => (bool, u8));
 expect_variant!(expect_set_bho, SetBatteryHealthOptimizer { result } => bool);
 expect_variant!(
@@ -197,12 +197,10 @@ pub fn set_fan_speed(ac: bool, rpm: i32) -> Result<(), DaemonError> {
     applied(expect_set_fan(response)?)
 }
 
-#[allow(dead_code)]
 pub fn brightness(ac: bool) -> Result<u8, DaemonError> {
     expect_brightness(request(&DaemonCommand::GetBrightness { ac: ac_wire(ac) })?)
 }
 
-#[allow(dead_code)]
 pub fn set_brightness(ac: bool, val: u8) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetBrightness {
         ac: ac_wire(ac),
@@ -211,14 +209,12 @@ pub fn set_brightness(ac: bool, val: u8) -> Result<(), DaemonError> {
     accepted("set brightness", expect_set_brightness(response)?)
 }
 
-#[allow(dead_code)]
 pub fn logo(ac: bool) -> Result<u8, DaemonError> {
     expect_logo(request(&DaemonCommand::GetLogoLedState {
         ac: ac_wire(ac),
     })?)
 }
 
-#[allow(dead_code)]
 pub fn set_logo(ac: bool, state: u8) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetLogoLedState {
         ac: ac_wire(ac),
@@ -227,12 +223,10 @@ pub fn set_logo(ac: bool, state: u8) -> Result<(), DaemonError> {
     accepted("set logo state", expect_set_logo(response)?)
 }
 
-#[allow(dead_code)]
 pub fn standard_effect() -> Result<(u8, Vec<u8>), DaemonError> {
     expect_standard_effect(request(&DaemonCommand::GetStandardEffect)?)
 }
 
-#[allow(dead_code)]
 pub fn set_effect(name: &str, params: Vec<u8>) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetEffect {
         name: name.to_string(),

@@ -43,9 +43,6 @@ const PAGES: [(Page, &str); 6] = [
 struct Capabilities {
     device_name: String,
     is_2025: bool,
-    // `has_logo` gates the Lighting page (Task 10) controls; unused until
-    // that page is wired.
-    #[allow(dead_code)]
     has_logo: bool,
     can_boost: bool,
     fan_range: (u16, u16),
@@ -104,6 +101,7 @@ enum Message {
     Overview(pages::overview::Message),
     Performance(pages::performance::Message),
     Gpu(pages::gpu::Message),
+    Lighting(pages::lighting::Message),
     Telemetry(telemetry::Snapshot),
 }
 
@@ -121,6 +119,7 @@ struct App {
     telemetry: telemetry::Snapshot,
     performance: pages::performance::State,
     gpu: pages::gpu::State,
+    lighting: pages::lighting::State,
 }
 
 fn bootstrap() -> Task<Message> {
@@ -157,6 +156,7 @@ impl App {
             telemetry: telemetry::Snapshot::EMPTY,
             performance: pages::performance::State::new(),
             gpu: pages::gpu::State::new(),
+            lighting: pages::lighting::State::new(),
         };
         (app, Task::batch([open_window(), bootstrap()]))
     }
@@ -200,6 +200,7 @@ impl App {
                 Task::batch([
                     pages::performance::load(ac).map(Message::Performance),
                     pages::gpu::load().map(Message::Gpu),
+                    pages::lighting::load(ac).map(Message::Lighting),
                 ])
             }
             Message::Bootstrapped(Err(error)) => {
@@ -266,6 +267,19 @@ impl App {
                 };
                 Task::batch([
                     pages::gpu::update(&mut self.gpu, message).map(Message::Gpu),
+                    follow_up,
+                ])
+            }
+            Message::Lighting(message) => {
+                let follow_up = match &message {
+                    pages::lighting::Message::Applied(Ok(())) => status_task("Applied".to_string()),
+                    pages::lighting::Message::Applied(Err(error)) => {
+                        status_task(format!("Lighting change failed: {error}"))
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([
+                    pages::lighting::update(&mut self.lighting, message).map(Message::Lighting),
                     follow_up,
                 ])
             }
@@ -342,7 +356,10 @@ impl App {
                     .map(Message::Performance)
             }
             Page::Gpu => pages::gpu::view(&self.gpu).map(Message::Gpu),
-            // Remaining pages land in Tasks 10-11.
+            Page::Lighting => {
+                pages::lighting::view(&self.lighting, capabilities).map(Message::Lighting)
+            }
+            // Remaining pages land in Task 11.
             _ => container(text("Coming soon").color(theme::MUTED))
                 .center(Fill)
                 .into(),
