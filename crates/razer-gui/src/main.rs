@@ -1,10 +1,8 @@
 #[allow(dead_code)]
 mod daemon;
 mod pages;
-#[allow(dead_code)]
 mod telemetry;
 mod theme;
-#[allow(dead_code)]
 mod widgets;
 
 use daemon::DaemonError;
@@ -42,14 +40,15 @@ const PAGES: [(Page, &str); 6] = [
 
 /// What the GUI may show for this laptop, resolved once at startup from the
 /// daemon's device name matched against the packaged laptops.json.
-// Only `device_name` is read this task; the rest gate page-specific controls
-// added in Tasks 7-11.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct Capabilities {
     device_name: String,
     is_2025: bool,
+    // `has_logo` and `can_boost` gate the Lighting (Task 10) and Performance
+    // (Task 8) page controls; unused until those pages are wired.
+    #[allow(dead_code)]
     has_logo: bool,
+    #[allow(dead_code)]
     can_boost: bool,
     fan_range: (u16, u16),
 }
@@ -104,6 +103,7 @@ enum Message {
     Status(String),
     StatusExpired,
     About(pages::about::Message),
+    Overview(pages::overview::Message),
     Telemetry(telemetry::Snapshot),
 }
 
@@ -126,7 +126,6 @@ fn bootstrap() -> Task<Message> {
 }
 
 // Called by page tasks (Tasks 7-11) that emit a transient status line.
-#[allow(dead_code)]
 fn status_task(message: String) -> Task<Message> {
     Task::batch([
         Task::done(Message::Status(message)),
@@ -214,6 +213,19 @@ impl App {
                 pages::about::update(message);
                 Task::none()
             }
+            Message::Overview(message) => {
+                if let pages::overview::Message::ProfileApplied(result) = &message {
+                    let follow_up = match result {
+                        Ok(()) => status_task("Profile applied".to_string()),
+                        Err(error) => status_task(format!("Profile change failed: {error}")),
+                    };
+                    return Task::batch([
+                        pages::overview::update(message).map(Message::Overview),
+                        follow_up,
+                    ]);
+                }
+                pages::overview::update(message).map(Message::Overview)
+            }
             Message::Telemetry(snapshot) => {
                 self.telemetry = snapshot;
                 Task::none()
@@ -276,10 +288,13 @@ impl App {
         .into()
     }
 
-    fn view_page<'a>(&self, capabilities: &'a Capabilities) -> Element<'a, Message> {
+    fn view_page<'a>(&'a self, capabilities: &'a Capabilities) -> Element<'a, Message> {
         let body: Element<'_, Message> = match self.page {
             Page::About => pages::about::view(&capabilities.device_name).map(Message::About),
-            // Remaining pages land in Tasks 7-11.
+            Page::Overview => {
+                pages::overview::view(&self.telemetry, capabilities).map(Message::Overview)
+            }
+            // Remaining pages land in Tasks 8-11.
             _ => container(text("Coming soon").color(theme::MUTED))
                 .center(Fill)
                 .into(),

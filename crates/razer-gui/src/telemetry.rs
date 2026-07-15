@@ -10,12 +10,16 @@ pub struct GpuTelemetry {
     pub usage_percent: f32,
     pub watts: f32,
     pub temp_c: f32,
+    // Shown on the GPU page (Task 9); unused until that page is wired.
+    #[allow(dead_code)]
     pub name: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct BatteryInfo {
     pub percent: u8,
+    // Shown on the Battery page (Task 11); unused until that page is wired.
+    #[allow(dead_code)]
     pub status: String,
     /// Positive while charging, negative while discharging, None when unknown.
     pub watts: Option<f32>,
