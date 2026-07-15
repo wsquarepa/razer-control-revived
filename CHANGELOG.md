@@ -5,7 +5,11 @@
 - The settings GUI is back as `razer-gui`: an Iced-based neon dashboard with an
   Overview telemetry grid (CPU/GPU usage, watts, fans, temps), the full
   performance/GPU/lighting/battery feature set from the GTK app, and a
-  status-notifier tray. Packaging integration is still pending.
+  status-notifier tray.
+- `install-local.sh` rebuilt for the workspace layout: builds and installs the
+  daemon, CLI, GUI, and system assets on any systemd distro, grants the daemon
+  the file capability needed for CPU wattage telemetry, migrates pre-workspace
+  installs, and gains `--uninstall` / `--purge` modes.
 
 ## 0.3.0-rc1 (2026-03-27)
 
