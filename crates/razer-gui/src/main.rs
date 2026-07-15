@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod daemon;
 mod pages;
 mod telemetry;
@@ -44,11 +43,10 @@ const PAGES: [(Page, &str); 6] = [
 struct Capabilities {
     device_name: String,
     is_2025: bool,
-    // `has_logo` and `can_boost` gate the Lighting (Task 10) and Performance
-    // (Task 8) page controls; unused until those pages are wired.
+    // `has_logo` gates the Lighting page (Task 10) controls; unused until
+    // that page is wired.
     #[allow(dead_code)]
     has_logo: bool,
-    #[allow(dead_code)]
     can_boost: bool,
     fan_range: (u16, u16),
 }
@@ -104,6 +102,7 @@ enum Message {
     StatusExpired,
     About(pages::about::Message),
     Overview(pages::overview::Message),
+    Performance(pages::performance::Message),
     Telemetry(telemetry::Snapshot),
 }
 
@@ -119,6 +118,7 @@ struct App {
     connection: Connection,
     status: Option<String>,
     telemetry: telemetry::Snapshot,
+    performance: pages::performance::State,
 }
 
 fn bootstrap() -> Task<Message> {
@@ -153,6 +153,7 @@ impl App {
             connection: Connection::Connecting,
             status: None,
             telemetry: telemetry::Snapshot::EMPTY,
+            performance: pages::performance::State::new(),
         };
         (app, Task::batch([open_window(), bootstrap()]))
     }
@@ -191,7 +192,9 @@ impl App {
             }
             Message::Bootstrapped(Ok(capabilities)) => {
                 self.connection = Connection::Connected(capabilities);
-                Task::none()
+                let ac = telemetry::read_ac_online(std::path::Path::new("/sys/class/power_supply"))
+                    .unwrap_or(true);
+                pages::performance::load(ac).map(Message::Performance)
             }
             Message::Bootstrapped(Err(error)) => {
                 self.connection = Connection::Unreachable(error.to_string());
@@ -225,6 +228,26 @@ impl App {
                     ]);
                 }
                 pages::overview::update(message).map(Message::Overview)
+            }
+            Message::Performance(message) => {
+                let Connection::Connected(capabilities) = &self.connection else {
+                    return Task::none();
+                };
+                let follow_up = match &message {
+                    pages::performance::Message::Applied(Ok(())) => {
+                        status_task("Applied".to_string())
+                    }
+                    pages::performance::Message::Applied(Err(error)) => {
+                        status_task(format!("Change failed: {error}"))
+                    }
+                    _ => Task::none(),
+                };
+                let capabilities = capabilities.clone();
+                Task::batch([
+                    pages::performance::update(&mut self.performance, message, &capabilities)
+                        .map(Message::Performance),
+                    follow_up,
+                ])
             }
             Message::Telemetry(snapshot) => {
                 self.telemetry = snapshot;
@@ -294,7 +317,11 @@ impl App {
             Page::Overview => {
                 pages::overview::view(&self.telemetry, capabilities).map(Message::Overview)
             }
-            // Remaining pages land in Tasks 8-11.
+            Page::Performance => {
+                pages::performance::view(&self.performance, capabilities, &self.telemetry)
+                    .map(Message::Performance)
+            }
+            // Remaining pages land in Tasks 9-11.
             _ => container(text("Coming soon").color(theme::MUTED))
                 .center(Fill)
                 .into(),

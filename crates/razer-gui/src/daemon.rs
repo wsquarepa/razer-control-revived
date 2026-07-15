@@ -80,6 +80,10 @@ pub async fn blocking<T: Send + 'static>(
 
 macro_rules! expect_variant {
     ($fn_name:ident, $variant:ident { $($field:ident),+ } => $out:ty) => {
+        // Some of these parsers only serve wrappers for pages not yet wired
+        // (Tasks 9-11); attribute forwarding through a macro invocation
+        // doesn't reach the generated item, so the allow lives here instead.
+        #[allow(dead_code)]
         fn $fn_name(response: DaemonResponse) -> Result<$out, DaemonError> {
             match response {
                 DaemonResponse::$variant { $($field),+ } => Ok(($($field),+)),
@@ -127,6 +131,10 @@ fn applied(result: CommandResult) -> Result<(), DaemonError> {
     }
 }
 
+// `accepted`, `GpuStatus`, and the wrappers below serve the Lighting (Task
+// 10), Battery (Task 11), and GPU (Task 9) pages; unused until those pages
+// are wired.
+#[allow(dead_code)]
 fn accepted(context: &'static str, ok: bool) -> Result<(), DaemonError> {
     if ok {
         Ok(())
@@ -136,6 +144,7 @@ fn accepted(context: &'static str, ok: bool) -> Result<(), DaemonError> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GpuStatus {
     pub gpus: Vec<GpuInfo>,
     pub dgpu_runtime_pm: bool,
@@ -181,10 +190,12 @@ pub fn set_fan_speed(ac: bool, rpm: i32) -> Result<(), DaemonError> {
     applied(expect_set_fan(response)?)
 }
 
+#[allow(dead_code)]
 pub fn brightness(ac: bool) -> Result<u8, DaemonError> {
     expect_brightness(request(&DaemonCommand::GetBrightness { ac: ac_wire(ac) })?)
 }
 
+#[allow(dead_code)]
 pub fn set_brightness(ac: bool, val: u8) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetBrightness {
         ac: ac_wire(ac),
@@ -193,12 +204,14 @@ pub fn set_brightness(ac: bool, val: u8) -> Result<(), DaemonError> {
     accepted("set brightness", expect_set_brightness(response)?)
 }
 
+#[allow(dead_code)]
 pub fn logo(ac: bool) -> Result<u8, DaemonError> {
     expect_logo(request(&DaemonCommand::GetLogoLedState {
         ac: ac_wire(ac),
     })?)
 }
 
+#[allow(dead_code)]
 pub fn set_logo(ac: bool, state: u8) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetLogoLedState {
         ac: ac_wire(ac),
@@ -207,10 +220,12 @@ pub fn set_logo(ac: bool, state: u8) -> Result<(), DaemonError> {
     accepted("set logo state", expect_set_logo(response)?)
 }
 
+#[allow(dead_code)]
 pub fn standard_effect() -> Result<(u8, Vec<u8>), DaemonError> {
     expect_standard_effect(request(&DaemonCommand::GetStandardEffect)?)
 }
 
+#[allow(dead_code)]
 pub fn set_effect(name: &str, params: Vec<u8>) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetEffect {
         name: name.to_string(),
@@ -219,10 +234,12 @@ pub fn set_effect(name: &str, params: Vec<u8>) -> Result<(), DaemonError> {
     accepted("set keyboard effect", expect_set_effect(response)?)
 }
 
+#[allow(dead_code)]
 pub fn bho() -> Result<(bool, u8), DaemonError> {
     expect_bho(request(&DaemonCommand::GetBatteryHealthOptimizer())?)
 }
 
+#[allow(dead_code)]
 pub fn set_bho(on: bool, threshold: u8) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetBatteryHealthOptimizer {
         is_on: on,
@@ -231,6 +248,7 @@ pub fn set_bho(on: bool, threshold: u8) -> Result<(), DaemonError> {
     accepted("set battery health optimizer", expect_set_bho(response)?)
 }
 
+#[allow(dead_code)]
 pub fn gpu_status() -> Result<GpuStatus, DaemonError> {
     let (gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available) =
         expect_gpu_status(request(&DaemonCommand::GetGpuStatus)?)?;
@@ -242,11 +260,13 @@ pub fn gpu_status() -> Result<GpuStatus, DaemonError> {
     })
 }
 
+#[allow(dead_code)]
 pub fn set_dgpu_runtime_pm(enabled: bool) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetDgpuRuntimePM { enabled })?;
     accepted("set dgpu runtime pm", expect_set_dgpu_pm(response)?)
 }
 
+#[allow(dead_code)]
 pub fn set_gpu_mode(mode: &str) -> Result<String, DaemonError> {
     let (ok, message) = expect_set_gpu_mode(request(&DaemonCommand::SetGpuMode {
         mode: mode.to_string(),
