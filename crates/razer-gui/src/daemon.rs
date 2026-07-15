@@ -115,6 +115,7 @@ expect_variant!(
 );
 expect_variant!(expect_set_dgpu_pm, SetDgpuRuntimePM { result } => bool);
 expect_variant!(expect_set_gpu_mode, SetGpuMode { result, message } => (bool, String));
+expect_variant!(expect_cpu_energy, GetCpuEnergy { microjoules } => Option<u64>);
 
 fn ac_wire(ac: bool) -> usize {
     if ac { 1 } else { 0 }
@@ -247,6 +248,10 @@ pub fn set_dgpu_runtime_pm(enabled: bool) -> Result<(), DaemonError> {
     accepted("set dgpu runtime pm", expect_set_dgpu_pm(response)?)
 }
 
+pub fn cpu_energy() -> Result<Option<u64>, DaemonError> {
+    expect_cpu_energy(request(&DaemonCommand::GetCpuEnergy)?)
+}
+
 pub fn set_gpu_mode(mode: &str) -> Result<String, DaemonError> {
     let (ok, message) = expect_set_gpu_mode(request(&DaemonCommand::SetGpuMode {
         mode: mode.to_string(),
@@ -364,6 +369,7 @@ mod tests {
             DaemonCommand::SetGpuMode {
                 mode: "hybrid".to_string(),
             },
+            DaemonCommand::GetCpuEnergy,
         ];
         for command in commands {
             let bytes = bincode::serialize(&command).expect("serialize");

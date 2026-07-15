@@ -164,24 +164,10 @@ pub fn nvidia_runtime_status(pci_devices_dir: &Path) -> Option<String> {
     None
 }
 
-fn find_rapl_energy_file() -> Option<std::path::PathBuf> {
-    let base = Path::new("/sys/class/powercap");
-    let entries = std::fs::read_dir(base).ok()?;
-    for entry in entries.flatten() {
-        let name = read_trimmed(&entry.path().join("name"));
-        // "package-0" covers both intel-rapl and the AMD rapl driver.
-        if name.is_some_and(|n| n.starts_with("package")) {
-            return Some(entry.path().join("energy_uj"));
-        }
-    }
-    None
-}
-
 pub struct Sampler {
     nvml: Option<Nvml>,
     prev_cpu: Option<CpuStat>,
     prev_rapl: Option<(u64, Instant)>,
-    rapl_energy_file: Option<std::path::PathBuf>,
 }
 
 impl Sampler {
@@ -197,7 +183,6 @@ impl Sampler {
             nvml,
             prev_cpu: None,
             prev_rapl: None,
-            rapl_energy_file: find_rapl_energy_file(),
         }
     }
 
@@ -212,9 +197,12 @@ impl Sampler {
         usage
     }
 
-    fn sample_cpu_watts(&mut self) -> Option<f32> {
-        let file = self.rapl_energy_file.as_ref()?;
-        let next_uj: u64 = read_trimmed(file)?.parse().ok()?;
+    /// Converts the daemon-supplied CPU package energy counter to watts using
+    /// the delta from the previous sample. `next_uj` is `None` whenever the
+    /// daemon could not read a RAPL package counter, in which case the delta
+    /// state carries over unresampled and the result is `None`.
+    fn sample_cpu_watts(&mut self, next_uj: Option<u64>) -> Option<f32> {
+        let next_uj = next_uj?;
         let now = Instant::now();
         let watts = self
             .prev_rapl
@@ -251,10 +239,13 @@ impl Sampler {
         }
     }
 
-    pub fn sample(&mut self, include_load: bool) -> Snapshot {
+    pub fn sample(&mut self, include_load: bool, cpu_energy_uj: Option<u64>) -> Snapshot {
         let power_supply = Path::new("/sys/class/power_supply");
         let (cpu_usage_percent, cpu_watts) = if include_load {
-            (self.sample_cpu_usage(), self.sample_cpu_watts())
+            (
+                self.sample_cpu_usage(),
+                self.sample_cpu_watts(cpu_energy_uj),
+            )
         } else {
             (None, None)
         };
@@ -309,7 +300,15 @@ fn snapshot_stream() -> impl Stream<Item = Snapshot> {
             let include_load = WINDOW_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
             let (returned_sampler, returned_thermal, snapshot) =
                 tokio::task::spawn_blocking(move || {
-                    let mut snapshot = sampler.sample(include_load);
+                    let cpu_energy_uj = if include_load {
+                        crate::daemon::cpu_energy().unwrap_or_else(|error| {
+                            log::warn!("cpu energy telemetry unavailable: {error}");
+                            None
+                        })
+                    } else {
+                        None
+                    };
+                    let mut snapshot = sampler.sample(include_load, cpu_energy_uj);
                     let thermal = latest_thermal(last_thermal, crate::daemon::thermal_status());
                     snapshot.thermal = thermal.clone();
                     (sampler, thermal, snapshot)
