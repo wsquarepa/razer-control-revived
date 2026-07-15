@@ -1,3 +1,4 @@
+use crate::Capabilities;
 use crate::daemon::{self, DaemonError};
 use crate::theme;
 use crate::widgets::{section, setting_row};
@@ -14,7 +15,6 @@ pub fn clamp_threshold(value: u8) -> u8 {
 pub struct State {
     loaded: bool,
     on: bool,
-    threshold: u8,
     slider_threshold: u8,
 }
 
@@ -23,7 +23,6 @@ impl State {
         State {
             loaded: false,
             on: false,
-            threshold: MAX_THRESHOLD,
             slider_threshold: MAX_THRESHOLD,
         }
     }
@@ -56,8 +55,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Loaded(Ok((on, threshold))) => {
             state.loaded = true;
             state.on = on;
-            state.threshold = clamp_threshold(threshold);
-            state.slider_threshold = state.threshold;
+            state.slider_threshold = clamp_threshold(threshold);
             Task::none()
         }
         Message::Loaded(Err(error)) => Task::done(Message::Applied(Err(error))),
@@ -71,7 +69,19 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     }
 }
 
-pub fn view(state: &State) -> Element<'_, Message> {
+pub fn view<'a>(state: &'a State, capabilities: &'a Capabilities) -> Element<'a, Message> {
+    if !capabilities.has_bho {
+        return column![section(
+            Some("Battery Health Optimizer"),
+            vec![
+                text("Battery Health Optimizer is not available on this device")
+                    .color(theme::MUTED)
+                    .into()
+            ],
+        )]
+        .width(Fill)
+        .into();
+    }
     if !state.loaded {
         return text("Loading battery settings...")
             .color(theme::MUTED)

@@ -94,7 +94,6 @@ impl fmt::Display for LogoMode {
 pub struct State {
     ac: bool,
     loaded: bool,
-    brightness: u8,
     slider_brightness: u8,
     logo: Option<LogoMode>,
     effect: EffectChoice,
@@ -107,7 +106,6 @@ impl State {
         State {
             ac: true,
             loaded: false,
-            brightness: 100,
             slider_brightness: 100,
             logo: None,
             effect: EffectChoice::Static,
@@ -171,7 +169,6 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::Loaded(ac, Ok(loaded)) => {
             state.ac = ac;
             state.loaded = true;
-            state.brightness = loaded.brightness;
             state.slider_brightness = loaded.brightness;
             state.logo = loaded.logo.and_then(LogoMode::from_wire);
             if let Some(effect) = EffectChoice::from_index(loaded.effect) {

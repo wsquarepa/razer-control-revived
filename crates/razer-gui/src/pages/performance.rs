@@ -357,6 +357,7 @@ mod tests {
             device_name: "Blade 16 2025".to_string(),
             is_2025: true,
             has_logo: false,
+            has_bho: false,
             can_boost: false,
             fan_range: (3300, 5400),
         };

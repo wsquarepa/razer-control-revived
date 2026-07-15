@@ -1,9 +1,3 @@
-// This module is the GUI's shared style catalog: only `app_theme` and
-// `TEXT_BRIGHT` are wired up by the empty daemon shell in this task. The
-// remaining constants and style functions become load-bearing as later
-// tasks build out the sidebar, cards, and pages that consume them.
-#![allow(dead_code)]
-
 use iced::widget::{button, container};
 use iced::{Background, Border, Color, Theme, theme};
 
@@ -15,6 +9,11 @@ pub const TEXT: Color = Color::from_rgb8(0xc8, 0xd6, 0xe5);
 pub const TEXT_BRIGHT: Color = Color::from_rgb8(0xe8, 0xf4, 0xff);
 pub const MUTED: Color = Color::from_rgb8(0x5a, 0x6a, 0x7a);
 pub const ACCENT: Color = Color::from_rgb8(0x00, 0xe5, 0xff);
+// The spec's gauge arc gradient (accent to ACCENT_DEEP) shipped as solid
+// accent plus a translucent glow understroke instead, so rendering never
+// reads this constant. It stays as the documented gradient stop and as
+// lighting's default secondary color value (see pages/lighting.rs).
+#[allow(dead_code)]
 pub const ACCENT_DEEP: Color = Color::from_rgb8(0x00, 0x77, 0xff);
 pub const WARM: Color = Color::from_rgb8(0xff, 0x9f, 0x43);
 pub const DANGER: Color = Color::from_rgb8(0xff, 0x6b, 0x6b);

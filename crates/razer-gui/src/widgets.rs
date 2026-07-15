@@ -135,9 +135,8 @@ impl<M> canvas::Program<M> for Gauge {
 }
 
 pub fn gauge_card<'a, M: 'a>(label: &'a str, gauge: Gauge) -> Element<'a, M> {
-    let dimmed = gauge.fraction.is_none();
     let label_text = text(label.to_uppercase()).size(11).color(theme::MUTED);
-    let card = container(
+    container(
         column![
             label_text,
             canvas::Canvas::new(gauge).width(Fill).height(120)
@@ -147,17 +146,8 @@ pub fn gauge_card<'a, M: 'a>(label: &'a str, gauge: Gauge) -> Element<'a, M> {
     )
     .style(theme::card)
     .padding(12)
-    .width(Fill);
-    if dimmed {
-        // Keep the card in place; absence reads as a dimmed em-dash state.
-        card.style(|t: &Theme| iced::widget::container::Style {
-            text_color: Some(theme::MUTED),
-            ..theme::card(t)
-        })
-        .into()
-    } else {
-        card.into()
-    }
+    .width(Fill)
+    .into()
 }
 
 pub fn section<'a, M: 'a>(title: Option<&'a str>, rows: Vec<Element<'a, M>>) -> Element<'a, M> {

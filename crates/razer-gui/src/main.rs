@@ -45,6 +45,7 @@ struct Capabilities {
     device_name: String,
     is_2025: bool,
     has_logo: bool,
+    has_bho: bool,
     can_boost: bool,
     fan_range: (u16, u16),
 }
@@ -80,6 +81,7 @@ impl Capabilities {
             device_name,
             is_2025: entry.pid.eq_ignore_ascii_case("02C6"),
             has_logo: entry.features.iter().any(|f| f == "logo"),
+            has_bho: entry.features.iter().any(|f| f == "bho"),
             can_boost: entry.features.iter().any(|f| f == "boost"),
             fan_range: (
                 entry.fan.first().copied().unwrap_or(3300),
@@ -211,15 +213,19 @@ impl App {
                 Task::none()
             }
             Message::Bootstrapped(Ok(capabilities)) => {
-                self.connection = Connection::Connected(capabilities);
                 let ac = telemetry::read_ac_online(std::path::Path::new("/sys/class/power_supply"))
                     .unwrap_or(true);
-                Task::batch([
+                let has_bho = capabilities.has_bho;
+                self.connection = Connection::Connected(capabilities);
+                let mut tasks = vec![
                     pages::performance::load(ac).map(Message::Performance),
                     pages::gpu::load().map(Message::Gpu),
                     pages::lighting::load(ac).map(Message::Lighting),
-                    pages::battery::load().map(Message::Battery),
-                ])
+                ];
+                if has_bho {
+                    tasks.push(pages::battery::load().map(Message::Battery));
+                }
+                Task::batch(tasks)
             }
             Message::Bootstrapped(Err(error)) => {
                 self.connection = Connection::Unreachable(error.to_string());
@@ -244,7 +250,16 @@ impl App {
             Message::Overview(message) => {
                 if let pages::overview::Message::ProfileApplied(result) = &message {
                     let follow_up = match result {
-                        Ok(()) => status_task("Profile applied".to_string()),
+                        Ok(()) => {
+                            let ac = telemetry::read_ac_online(std::path::Path::new(
+                                "/sys/class/power_supply",
+                            ))
+                            .unwrap_or(true);
+                            Task::batch([
+                                status_task("Profile applied".to_string()),
+                                pages::performance::load(ac).map(Message::Performance),
+                            ])
+                        }
                         Err(error) => status_task(format!("Profile change failed: {error}")),
                     };
                     return Task::batch([
@@ -395,7 +410,9 @@ impl App {
             Page::Lighting => {
                 pages::lighting::view(&self.lighting, capabilities).map(Message::Lighting)
             }
-            Page::Battery => pages::battery::view(&self.battery).map(Message::Battery),
+            Page::Battery => {
+                pages::battery::view(&self.battery, capabilities).map(Message::Battery)
+            }
         };
         scrollable(container(body).padding(18).width(Fill))
             .height(Fill)

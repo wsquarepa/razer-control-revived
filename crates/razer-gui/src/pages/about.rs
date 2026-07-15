@@ -3,7 +3,7 @@ use crate::widgets::section;
 use iced::widget::{button, column, text};
 use iced::{Element, Fill};
 
-pub const REPO_URL: &str = "https://github.com/encomjp/razer-control";
+pub const REPO_URL: &str = "https://github.com/encomjp/razer-control-revived";
 pub const DONATE_URL: &str = "https://www.paypal.com/donate/?hosted_button_id=H4SCC24R8KS4A";
 
 #[derive(Debug, Clone)]
