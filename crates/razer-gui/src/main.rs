@@ -2,6 +2,7 @@ mod daemon;
 mod pages;
 mod telemetry;
 mod theme;
+mod tray;
 mod widgets;
 
 use daemon::DaemonError;
@@ -104,6 +105,7 @@ enum Message {
     Lighting(pages::lighting::Message),
     Battery(pages::battery::Message),
     Telemetry(telemetry::Snapshot),
+    Tray(tray::TrayEvent),
 }
 
 enum Connection {
@@ -122,6 +124,7 @@ struct App {
     gpu: pages::gpu::State,
     lighting: pages::lighting::State,
     battery: pages::battery::State,
+    tray_active: bool,
 }
 
 fn bootstrap() -> Task<Message> {
@@ -143,6 +146,11 @@ fn open_window() -> Task<Message> {
     let (_id, open) = window::open(window::Settings {
         size: iced::Size::new(980.0, 680.0),
         min_size: Some(iced::Size::new(760.0, 520.0)),
+        // Without this, iced_winit closes the window itself on the OS close
+        // button and never forwards the event to `window::close_requests()`,
+        // so `Message::CloseRequested` (and the tray_active close-to-tray
+        // branch) would never run.
+        exit_on_close_request: false,
         ..window::Settings::default()
     });
     open.map(Message::WindowOpened)
@@ -150,6 +158,7 @@ fn open_window() -> Task<Message> {
 
 impl App {
     fn new() -> (Self, Task<Message>) {
+        let tray_active = tray::spawn();
         let app = Self {
             window: None,
             page: Page::Overview,
@@ -160,6 +169,7 @@ impl App {
             gpu: pages::gpu::State::new(),
             lighting: pages::lighting::State::new(),
             battery: pages::battery::State::new(),
+            tray_active,
         };
         (app, Task::batch([open_window(), bootstrap()]))
     }
@@ -176,6 +186,7 @@ impl App {
         Subscription::batch([
             window::close_requests().map(Message::CloseRequested),
             telemetry::subscription().map(Message::Telemetry),
+            tray::subscription().map(Message::Tray),
         ])
     }
 
@@ -186,11 +197,14 @@ impl App {
                 telemetry::WINDOW_VISIBLE.store(true, std::sync::atomic::Ordering::Relaxed);
                 Task::none()
             }
-            // Tray integration (Task 12) turns this into close-to-tray.
             Message::CloseRequested(id) => {
                 self.window = None;
                 telemetry::WINDOW_VISIBLE.store(false, std::sync::atomic::Ordering::Relaxed);
-                Task::batch([window::close(id), iced::exit()])
+                if self.tray_active {
+                    window::close(id)
+                } else {
+                    Task::batch([window::close(id), iced::exit()])
+                }
             }
             Message::Navigate(page) => {
                 self.page = page;
@@ -304,6 +318,11 @@ impl App {
                 self.telemetry = snapshot;
                 Task::none()
             }
+            Message::Tray(tray::TrayEvent::Open) => match self.window {
+                Some(id) => window::gain_focus(id),
+                None => open_window(),
+            },
+            Message::Tray(tray::TrayEvent::Quit) => iced::exit(),
         }
     }
 
