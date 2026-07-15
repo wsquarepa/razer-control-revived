@@ -156,11 +156,10 @@ fn apply(
     ac: bool,
     work: impl FnOnce() -> Result<(), DaemonError> + Send + 'static,
 ) -> Task<Message> {
-    Task::batch([
-        Task::perform(daemon::blocking(work), Message::Applied),
-        // Reload after every write: state only ever reflects daemon truth.
-        load(ac),
-    ])
+    // Reload after every write: state only ever reflects daemon truth. The
+    // reload is chained, not batched: a batch runs both tasks concurrently
+    // and the reload could read the pre-write value.
+    Task::perform(daemon::blocking(work), Message::Applied).chain(load(ac))
 }
 
 pub fn update(state: &mut State, message: Message, capabilities: &Capabilities) -> Task<Message> {
