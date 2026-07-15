@@ -103,6 +103,7 @@ enum Message {
     About(pages::about::Message),
     Overview(pages::overview::Message),
     Performance(pages::performance::Message),
+    Gpu(pages::gpu::Message),
     Telemetry(telemetry::Snapshot),
 }
 
@@ -119,6 +120,7 @@ struct App {
     status: Option<String>,
     telemetry: telemetry::Snapshot,
     performance: pages::performance::State,
+    gpu: pages::gpu::State,
 }
 
 fn bootstrap() -> Task<Message> {
@@ -154,6 +156,7 @@ impl App {
             status: None,
             telemetry: telemetry::Snapshot::EMPTY,
             performance: pages::performance::State::new(),
+            gpu: pages::gpu::State::new(),
         };
         (app, Task::batch([open_window(), bootstrap()]))
     }
@@ -194,7 +197,10 @@ impl App {
                 self.connection = Connection::Connected(capabilities);
                 let ac = telemetry::read_ac_online(std::path::Path::new("/sys/class/power_supply"))
                     .unwrap_or(true);
-                pages::performance::load(ac).map(Message::Performance)
+                Task::batch([
+                    pages::performance::load(ac).map(Message::Performance),
+                    pages::gpu::load().map(Message::Gpu),
+                ])
             }
             Message::Bootstrapped(Err(error)) => {
                 self.connection = Connection::Unreachable(error.to_string());
@@ -246,6 +252,20 @@ impl App {
                 Task::batch([
                     pages::performance::update(&mut self.performance, message, &capabilities)
                         .map(Message::Performance),
+                    follow_up,
+                ])
+            }
+            Message::Gpu(message) => {
+                let follow_up = match &message {
+                    // envycontrol's reply text tells the user a reboot is needed.
+                    pages::gpu::Message::Applied(Ok(text)) => status_task(text.clone()),
+                    pages::gpu::Message::Applied(Err(error)) => {
+                        status_task(format!("GPU change failed: {error}"))
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([
+                    pages::gpu::update(&mut self.gpu, message).map(Message::Gpu),
                     follow_up,
                 ])
             }
@@ -321,7 +341,8 @@ impl App {
                 pages::performance::view(&self.performance, capabilities, &self.telemetry)
                     .map(Message::Performance)
             }
-            // Remaining pages land in Tasks 9-11.
+            Page::Gpu => pages::gpu::view(&self.gpu).map(Message::Gpu),
+            // Remaining pages land in Tasks 10-11.
             _ => container(text("Coming soon").color(theme::MUTED))
                 .center(Fill)
                 .into(),

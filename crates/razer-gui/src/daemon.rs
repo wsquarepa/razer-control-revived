@@ -79,9 +79,21 @@ pub async fn blocking<T: Send + 'static>(
 }
 
 macro_rules! expect_variant {
+    // Parsers for wrappers already wired into a page: no allow needed.
+    (live $fn_name:ident, $variant:ident { $($field:ident),+ } => $out:ty) => {
+        fn $fn_name(response: DaemonResponse) -> Result<$out, DaemonError> {
+            match response {
+                DaemonResponse::$variant { $($field),+ } => Ok(($($field),+)),
+                other => Err(DaemonError::Protocol {
+                    expected: stringify!($variant),
+                    got: format!("{other:?}"),
+                }),
+            }
+        }
+    };
     ($fn_name:ident, $variant:ident { $($field:ident),+ } => $out:ty) => {
-        // Some of these parsers only serve wrappers for pages not yet wired
-        // (Tasks 9-11); attribute forwarding through a macro invocation
+        // These parsers only serve wrappers for pages not yet wired
+        // (Tasks 10-11); attribute forwarding through a macro invocation
         // doesn't reach the generated item, so the allow lives here instead.
         #[allow(dead_code)]
         fn $fn_name(response: DaemonResponse) -> Result<$out, DaemonError> {
@@ -113,12 +125,12 @@ expect_variant!(expect_set_effect, SetEffect { result } => bool);
 expect_variant!(expect_bho, GetBatteryHealthOptimizer { is_on, threshold } => (bool, u8));
 expect_variant!(expect_set_bho, SetBatteryHealthOptimizer { result } => bool);
 expect_variant!(
-    expect_gpu_status,
+    live expect_gpu_status,
     GetGpuStatus { gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available }
         => (Vec<GpuInfo>, bool, String, bool)
 );
-expect_variant!(expect_set_dgpu_pm, SetDgpuRuntimePM { result } => bool);
-expect_variant!(expect_set_gpu_mode, SetGpuMode { result, message } => (bool, String));
+expect_variant!(live expect_set_dgpu_pm, SetDgpuRuntimePM { result } => bool);
+expect_variant!(live expect_set_gpu_mode, SetGpuMode { result, message } => (bool, String));
 
 fn ac_wire(ac: bool) -> usize {
     if ac { 1 } else { 0 }
@@ -131,10 +143,6 @@ fn applied(result: CommandResult) -> Result<(), DaemonError> {
     }
 }
 
-// `accepted`, `GpuStatus`, and the wrappers below serve the Lighting (Task
-// 10), Battery (Task 11), and GPU (Task 9) pages; unused until those pages
-// are wired.
-#[allow(dead_code)]
 fn accepted(context: &'static str, ok: bool) -> Result<(), DaemonError> {
     if ok {
         Ok(())
@@ -144,7 +152,6 @@ fn accepted(context: &'static str, ok: bool) -> Result<(), DaemonError> {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct GpuStatus {
     pub gpus: Vec<GpuInfo>,
     pub dgpu_runtime_pm: bool,
@@ -248,7 +255,6 @@ pub fn set_bho(on: bool, threshold: u8) -> Result<(), DaemonError> {
     accepted("set battery health optimizer", expect_set_bho(response)?)
 }
 
-#[allow(dead_code)]
 pub fn gpu_status() -> Result<GpuStatus, DaemonError> {
     let (gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available) =
         expect_gpu_status(request(&DaemonCommand::GetGpuStatus)?)?;
@@ -260,13 +266,11 @@ pub fn gpu_status() -> Result<GpuStatus, DaemonError> {
     })
 }
 
-#[allow(dead_code)]
 pub fn set_dgpu_runtime_pm(enabled: bool) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetDgpuRuntimePM { enabled })?;
     accepted("set dgpu runtime pm", expect_set_dgpu_pm(response)?)
 }
 
-#[allow(dead_code)]
 pub fn set_gpu_mode(mode: &str) -> Result<String, DaemonError> {
     let (ok, message) = expect_set_gpu_mode(request(&DaemonCommand::SetGpuMode {
         mode: mode.to_string(),
