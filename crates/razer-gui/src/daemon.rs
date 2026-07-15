@@ -79,23 +79,7 @@ pub async fn blocking<T: Send + 'static>(
 }
 
 macro_rules! expect_variant {
-    // Parsers for wrappers already wired into a page: no allow needed.
-    (live $fn_name:ident, $variant:ident { $($field:ident),+ } => $out:ty) => {
-        fn $fn_name(response: DaemonResponse) -> Result<$out, DaemonError> {
-            match response {
-                DaemonResponse::$variant { $($field),+ } => Ok(($($field),+)),
-                other => Err(DaemonError::Protocol {
-                    expected: stringify!($variant),
-                    got: format!("{other:?}"),
-                }),
-            }
-        }
-    };
     ($fn_name:ident, $variant:ident { $($field:ident),+ } => $out:ty) => {
-        // These parsers only serve wrappers for pages not yet wired
-        // (Tasks 10-11); attribute forwarding through a macro invocation
-        // doesn't reach the generated item, so the allow lives here instead.
-        #[allow(dead_code)]
         fn $fn_name(response: DaemonResponse) -> Result<$out, DaemonError> {
             match response {
                 DaemonResponse::$variant { $($field),+ } => Ok(($($field),+)),
@@ -116,21 +100,21 @@ expect_variant!(expect_gpu_boost, GetGPUBoost { gpu } => u8);
 expect_variant!(expect_set_power, SetPowerMode { result } => CommandResult);
 expect_variant!(expect_fan_speed, GetFanSpeed { rpm } => i32);
 expect_variant!(expect_set_fan, SetFanSpeed { result } => CommandResult);
-expect_variant!(live expect_brightness, GetBrightness { result } => u8);
-expect_variant!(live expect_set_brightness, SetBrightness { result } => bool);
-expect_variant!(live expect_logo, GetLogoLedState { logo_state } => u8);
-expect_variant!(live expect_set_logo, SetLogoLedState { result } => bool);
-expect_variant!(live expect_standard_effect, GetStandardEffect { effect, params } => (u8, Vec<u8>));
-expect_variant!(live expect_set_effect, SetEffect { result } => bool);
+expect_variant!(expect_brightness, GetBrightness { result } => u8);
+expect_variant!(expect_set_brightness, SetBrightness { result } => bool);
+expect_variant!(expect_logo, GetLogoLedState { logo_state } => u8);
+expect_variant!(expect_set_logo, SetLogoLedState { result } => bool);
+expect_variant!(expect_standard_effect, GetStandardEffect { effect, params } => (u8, Vec<u8>));
+expect_variant!(expect_set_effect, SetEffect { result } => bool);
 expect_variant!(expect_bho, GetBatteryHealthOptimizer { is_on, threshold } => (bool, u8));
 expect_variant!(expect_set_bho, SetBatteryHealthOptimizer { result } => bool);
 expect_variant!(
-    live expect_gpu_status,
+    expect_gpu_status,
     GetGpuStatus { gpus, dgpu_runtime_pm, envycontrol_mode, envycontrol_available }
         => (Vec<GpuInfo>, bool, String, bool)
 );
-expect_variant!(live expect_set_dgpu_pm, SetDgpuRuntimePM { result } => bool);
-expect_variant!(live expect_set_gpu_mode, SetGpuMode { result, message } => (bool, String));
+expect_variant!(expect_set_dgpu_pm, SetDgpuRuntimePM { result } => bool);
+expect_variant!(expect_set_gpu_mode, SetGpuMode { result, message } => (bool, String));
 
 fn ac_wire(ac: bool) -> usize {
     if ac { 1 } else { 0 }
@@ -235,12 +219,10 @@ pub fn set_effect(name: &str, params: Vec<u8>) -> Result<(), DaemonError> {
     accepted("set keyboard effect", expect_set_effect(response)?)
 }
 
-#[allow(dead_code)]
 pub fn bho() -> Result<(bool, u8), DaemonError> {
     expect_bho(request(&DaemonCommand::GetBatteryHealthOptimizer())?)
 }
 
-#[allow(dead_code)]
 pub fn set_bho(on: bool, threshold: u8) -> Result<(), DaemonError> {
     let response = request(&DaemonCommand::SetBatteryHealthOptimizer {
         is_on: on,

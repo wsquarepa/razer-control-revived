@@ -102,6 +102,7 @@ enum Message {
     Performance(pages::performance::Message),
     Gpu(pages::gpu::Message),
     Lighting(pages::lighting::Message),
+    Battery(pages::battery::Message),
     Telemetry(telemetry::Snapshot),
 }
 
@@ -120,6 +121,7 @@ struct App {
     performance: pages::performance::State,
     gpu: pages::gpu::State,
     lighting: pages::lighting::State,
+    battery: pages::battery::State,
 }
 
 fn bootstrap() -> Task<Message> {
@@ -157,6 +159,7 @@ impl App {
             performance: pages::performance::State::new(),
             gpu: pages::gpu::State::new(),
             lighting: pages::lighting::State::new(),
+            battery: pages::battery::State::new(),
         };
         (app, Task::batch([open_window(), bootstrap()]))
     }
@@ -201,6 +204,7 @@ impl App {
                     pages::performance::load(ac).map(Message::Performance),
                     pages::gpu::load().map(Message::Gpu),
                     pages::lighting::load(ac).map(Message::Lighting),
+                    pages::battery::load().map(Message::Battery),
                 ])
             }
             Message::Bootstrapped(Err(error)) => {
@@ -283,6 +287,19 @@ impl App {
                     follow_up,
                 ])
             }
+            Message::Battery(message) => {
+                let follow_up = match &message {
+                    pages::battery::Message::Applied(Ok(())) => status_task("Applied".to_string()),
+                    pages::battery::Message::Applied(Err(error)) => {
+                        status_task(format!("Battery change failed: {error}"))
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([
+                    pages::battery::update(&mut self.battery, message).map(Message::Battery),
+                    follow_up,
+                ])
+            }
             Message::Telemetry(snapshot) => {
                 self.telemetry = snapshot;
                 Task::none()
@@ -359,10 +376,7 @@ impl App {
             Page::Lighting => {
                 pages::lighting::view(&self.lighting, capabilities).map(Message::Lighting)
             }
-            // Remaining pages land in Task 11.
-            _ => container(text("Coming soon").color(theme::MUTED))
-                .center(Fill)
-                .into(),
+            Page::Battery => pages::battery::view(&self.battery).map(Message::Battery),
         };
         scrollable(container(body).padding(18).width(Fill))
             .height(Fill)
