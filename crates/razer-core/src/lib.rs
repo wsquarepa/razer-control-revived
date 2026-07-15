@@ -203,6 +203,15 @@ pub enum DaemonCommand {
     SetGpuMode {
         mode: String,
     },
+    /// Reads the raw CPU package energy counter (RAPL powercap) so the daemon
+    /// (root) can serve it to unprivileged clients whose kernel restricts
+    /// `energy_uj` to root (the PLATYPUS side-channel mitigation).
+    ///
+    /// APPEND-ONLY: this must stay the last `DaemonCommand` variant. bincode
+    /// encodes enum variants by positional index, so inserting a variant
+    /// anywhere else would silently reorder every variant after it and break
+    /// wire compatibility with already-installed clients and daemons.
+    GetCpuEnergy,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -287,6 +296,14 @@ pub enum DaemonResponse {
     SetGpuMode {
         result: bool,
         message: String,
+    },
+    /// Answers `DaemonCommand::GetCpuEnergy`. `microjoules` is `None` when the
+    /// machine exposes no readable RAPL package counter.
+    ///
+    /// APPEND-ONLY: this must stay the last `DaemonResponse` variant, for the
+    /// same bincode positional-encoding reason as `DaemonCommand::GetCpuEnergy`.
+    GetCpuEnergy {
+        microjoules: Option<u64>,
     },
 }
 
@@ -497,6 +514,36 @@ mod tests {
         assert_eq!(provisional_rpm_range(7), (3700, 5300));
         assert_eq!(performance_mode_label(1), "Unknown");
         assert_eq!(performance_mode_display(7), "Hyperboost (7)");
+    }
+
+    #[test]
+    fn cpu_energy_command_round_trips() {
+        let decoded = round_trip(&DaemonCommand::GetCpuEnergy);
+        assert!(matches!(decoded, DaemonCommand::GetCpuEnergy));
+    }
+
+    #[test]
+    fn cpu_energy_response_round_trips_with_a_reading() {
+        let response = DaemonResponse::GetCpuEnergy {
+            microjoules: Some(123_456_789),
+        };
+        let decoded = round_trip(&response);
+        assert!(matches!(
+            decoded,
+            DaemonResponse::GetCpuEnergy {
+                microjoules: Some(123_456_789)
+            }
+        ));
+    }
+
+    #[test]
+    fn cpu_energy_response_round_trips_with_no_reading() {
+        let response = DaemonResponse::GetCpuEnergy { microjoules: None };
+        let decoded = round_trip(&response);
+        assert!(matches!(
+            decoded,
+            DaemonResponse::GetCpuEnergy { microjoules: None }
+        ));
     }
 
     #[test]

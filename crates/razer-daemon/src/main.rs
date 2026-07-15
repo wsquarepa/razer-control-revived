@@ -13,6 +13,7 @@ use signal_hook::iterator::Signals;
 
 mod battery;
 mod config;
+mod cpu_energy;
 mod dbus_mutter_displayconfig;
 mod dbus_mutter_idlemonitor;
 mod device;
@@ -612,8 +613,14 @@ fn handle_data(mut stream: UnixStream) {
 pub fn process_client_request(
     cmd: razer_core::DaemonCommand,
 ) -> Option<razer_core::DaemonResponse> {
-    // GPU commands don't need DEV_MANAGER, handle them first
+    // GPU and CPU-energy commands don't need DEV_MANAGER (no Razer device
+    // required), handle them first.
     match &cmd {
+        razer_core::DaemonCommand::GetCpuEnergy => {
+            return Some(razer_core::DaemonResponse::GetCpuEnergy {
+                microjoules: cpu_energy::read_cpu_energy(),
+            });
+        }
         razer_core::DaemonCommand::GetGpuStatus => {
             let gpus = gpu::discover_gpus();
             let dgpu_rpm = gpu::get_dgpu_runtime_pm();
