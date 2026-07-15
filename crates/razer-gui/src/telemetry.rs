@@ -275,26 +275,49 @@ impl Sampler {
 use iced::Subscription;
 use iced::futures::{SinkExt, Stream};
 
+/// A failed daemon read, or a status carrying a thermal error, keeps the last
+/// good reading on screen: EC tachometer reads fail sporadically and flickering
+/// the gauges to their unavailable state every few seconds is worse than
+/// showing a reading that is a tick or two stale. Only error-free statuses are
+/// ever stored, so consumers never see `error: Some`.
+fn latest_thermal(
+    last: Option<razer_core::ThermalStatus>,
+    fresh: Result<razer_core::ThermalStatus, crate::daemon::DaemonError>,
+) -> Option<razer_core::ThermalStatus> {
+    match fresh {
+        Ok(status) if status.error.is_none() => Some(status),
+        Ok(status) => {
+            log::warn!(
+                "thermal read reported an error, keeping last good reading: {:?}",
+                status.error
+            );
+            last
+        }
+        Err(error) => {
+            log::warn!("thermal telemetry unavailable, keeping last good reading: {error}");
+            last
+        }
+    }
+}
+
 fn snapshot_stream() -> impl Stream<Item = Snapshot> {
     iced::stream::channel(1, async |mut out| {
         let mut sampler = Sampler::new();
+        let mut last_thermal: Option<razer_core::ThermalStatus> = None;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let include_load = WINDOW_VISIBLE.load(std::sync::atomic::Ordering::Relaxed);
-            let (returned_sampler, snapshot) = tokio::task::spawn_blocking(move || {
-                let mut snapshot = sampler.sample(include_load);
-                snapshot.thermal = match crate::daemon::thermal_status() {
-                    Ok(status) => Some(status),
-                    Err(error) => {
-                        log::warn!("thermal telemetry unavailable: {error}");
-                        None
-                    }
-                };
-                (sampler, snapshot)
-            })
-            .await
-            .expect("telemetry sampling task panicked");
+            let (returned_sampler, returned_thermal, snapshot) =
+                tokio::task::spawn_blocking(move || {
+                    let mut snapshot = sampler.sample(include_load);
+                    let thermal = latest_thermal(last_thermal, crate::daemon::thermal_status());
+                    snapshot.thermal = thermal.clone();
+                    (sampler, thermal, snapshot)
+                })
+                .await
+                .expect("telemetry sampling task panicked");
             sampler = returned_sampler;
+            last_thermal = returned_thermal;
             *SHARED.lock().expect("telemetry snapshot lock") = snapshot.clone();
             if out.send(snapshot).await.is_err() {
                 return;
@@ -385,5 +408,55 @@ mod tests {
         std::fs::write(dev.join("class"), "0x030000\n").expect("class");
         std::fs::write(dev.join("power/runtime_status"), "suspended\n").expect("status");
         assert_eq!(nvidia_runtime_status(&dir).as_deref(), Some("suspended"));
+    }
+
+    fn thermal_status(
+        cpu_rpm: u16,
+        error: Option<razer_core::ThermalFailureDto>,
+    ) -> razer_core::ThermalStatus {
+        razer_core::ThermalStatus {
+            safety_state: razer_core::ThermalSafetyStateDto::Ready,
+            performance_mode: 0,
+            fan_mode: razer_core::FanControlModeDto::Automatic,
+            cpu_rpm,
+            gpu_rpm: cpu_rpm,
+            error,
+        }
+    }
+
+    #[test]
+    fn a_fresh_good_reading_replaces_the_stale_one() {
+        let stale = thermal_status(1000, None);
+        let fresh = thermal_status(2000, None);
+        assert_eq!(latest_thermal(Some(stale), Ok(fresh.clone())), Some(fresh));
+    }
+
+    #[test]
+    fn a_fresh_reading_with_an_error_keeps_the_last_good_one() {
+        let last = thermal_status(1000, None);
+        let fresh_with_error = thermal_status(
+            0,
+            Some(razer_core::ThermalFailureDto {
+                code: razer_core::ThermalFailureCode::Transport,
+                message: "tachometer readback failed".to_string(),
+            }),
+        );
+        assert_eq!(
+            latest_thermal(Some(last.clone()), Ok(fresh_with_error)),
+            Some(last)
+        );
+    }
+
+    #[test]
+    fn a_failed_daemon_read_keeps_the_last_good_reading() {
+        let last = thermal_status(1000, None);
+        let error = crate::daemon::DaemonError::Unreachable("no daemon".to_string());
+        assert_eq!(latest_thermal(Some(last.clone()), Err(error)), Some(last));
+    }
+
+    #[test]
+    fn a_failed_daemon_read_with_no_prior_reading_stays_none() {
+        let error = crate::daemon::DaemonError::Unreachable("no daemon".to_string());
+        assert_eq!(latest_thermal(None, Err(error)), None);
     }
 }
