@@ -153,6 +153,14 @@ fn open_window() -> Task<Message> {
         // so `Message::CloseRequested` (and the tray_active close-to-tray
         // branch) would never run.
         exit_on_close_request: false,
+        platform_specific: window::settings::PlatformSpecific {
+            // Wayland compositors match windows to desktop entries by app id,
+            // which must equal the desktop file basename (razer-gui.desktop);
+            // iced's derived default ("razer_gui") breaks focus and taskbar
+            // association on KWin, as the GTK app's changelog records.
+            application_id: "razer-gui".to_string(),
+            ..window::settings::PlatformSpecific::default()
+        },
         ..window::Settings::default()
     });
     open.map(Message::WindowOpened)
