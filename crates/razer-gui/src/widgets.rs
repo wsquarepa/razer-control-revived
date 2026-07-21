@@ -170,12 +170,12 @@ pub fn setting_row<'a, M: 'a>(
     subtitle: &'a str,
     control: Element<'a, M>,
 ) -> Element<'a, M> {
-    let labels = column![
-        text(title).size(14).color(theme::TEXT_BRIGHT),
-        text(subtitle).size(11).color(theme::MUTED),
-    ]
-    .spacing(2)
-    .width(Fill);
+    let mut labels = column![text(title).size(14).color(theme::TEXT_BRIGHT)]
+        .spacing(2)
+        .width(Fill);
+    if !subtitle.is_empty() {
+        labels = labels.push(text(subtitle).size(11).color(theme::MUTED));
+    }
     row![labels, container(control).align_y(iced::Center)]
         .spacing(12)
         .align_y(iced::Center)
