@@ -122,6 +122,7 @@ struct App {
     connection: Connection,
     status: Option<String>,
     telemetry: telemetry::Snapshot,
+    overview: pages::overview::State,
     performance: pages::performance::State,
     gpu: pages::gpu::State,
     lighting: pages::lighting::State,
@@ -175,6 +176,7 @@ impl App {
             connection: Connection::Connecting,
             status: None,
             telemetry: telemetry::Snapshot::EMPTY,
+            overview: pages::overview::State::new(),
             performance: pages::performance::State::new(),
             gpu: pages::gpu::State::new(),
             lighting: pages::lighting::State::new(),
@@ -226,6 +228,7 @@ impl App {
                 let has_bho = capabilities.has_bho;
                 self.connection = Connection::Connected(capabilities);
                 let mut tasks = vec![
+                    pages::overview::load(ac).map(Message::Overview),
                     pages::performance::load(ac).map(Message::Performance),
                     pages::gpu::load().map(Message::Gpu),
                     pages::lighting::load(ac).map(Message::Lighting),
@@ -277,10 +280,13 @@ impl App {
                     pages::overview::Message::PreflightFinished(Err(error)) => {
                         status_task(format!("Preflight failed: {error}"))
                     }
+                    pages::overview::Message::BrightnessApplied(Err(error)) => {
+                        status_task(format!("Brightness change failed: {error}"))
+                    }
                     _ => Task::none(),
                 };
                 Task::batch([
-                    pages::overview::update(message).map(Message::Overview),
+                    pages::overview::update(&mut self.overview, message).map(Message::Overview),
                     follow_up,
                 ])
             }
@@ -345,8 +351,17 @@ impl App {
                 ])
             }
             Message::Telemetry(snapshot) => {
+                // The daemon holds a separate keyboard brightness per power
+                // source; re-read it whenever the live source flips so the
+                // overview slider tracks the source it will write to.
+                let reload = match snapshot.ac_online {
+                    Some(ac) if !self.overview.loaded || ac != self.overview.ac => {
+                        pages::overview::load(ac).map(Message::Overview)
+                    }
+                    _ => Task::none(),
+                };
                 self.telemetry = snapshot;
-                Task::none()
+                reload
             }
             Message::Tray(tray::TrayEvent::Open) => match self.window {
                 Some(id) => window::gain_focus(id),
@@ -414,9 +429,8 @@ impl App {
     fn view_page<'a>(&'a self, capabilities: &'a Capabilities) -> Element<'a, Message> {
         let body: Element<'_, Message> = match self.page {
             Page::About => pages::about::view(&capabilities.device_name).map(Message::About),
-            Page::Overview => {
-                pages::overview::view(&self.telemetry, capabilities).map(Message::Overview)
-            }
+            Page::Overview => pages::overview::view(&self.overview, &self.telemetry, capabilities)
+                .map(Message::Overview),
             Page::Performance => {
                 pages::performance::view(&self.performance, capabilities, &self.telemetry)
                     .map(Message::Performance)

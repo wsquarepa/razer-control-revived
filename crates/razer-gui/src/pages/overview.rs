@@ -3,7 +3,7 @@ use crate::daemon::{self, DaemonError};
 use crate::telemetry::Snapshot;
 use crate::theme;
 use crate::widgets::{Gauge, gauge_card, gauge_fraction};
-use iced::widget::{button, column, container, pick_list, row, text};
+use iced::widget::{button, column, container, pick_list, row, slider, text};
 use iced::{Element, Fill, Task};
 use razer_core::ThermalSafetyStateDto;
 use std::fmt;
@@ -51,16 +51,67 @@ pub fn mode_choices(is_2025: bool, ac: bool) -> Vec<ModeChoice> {
     }
 }
 
+/// Backs the overview's keyboard-brightness slider. The daemon keeps a
+/// separate brightness per power source, so `ac` records which source the
+/// live `brightness` was read for; a mismatch against the current AC status
+/// tells the caller to reload.
+pub struct State {
+    pub ac: bool,
+    pub loaded: bool,
+    brightness: u8,
+}
+
+impl State {
+    pub fn new() -> State {
+        State {
+            ac: true,
+            loaded: false,
+            brightness: 0,
+        }
+    }
+}
+
+pub fn load(ac: bool) -> Task<Message> {
+    Task::perform(
+        daemon::blocking(move || daemon::brightness(ac)),
+        move |result| Message::BrightnessLoaded(ac, result),
+    )
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     ProfileSelected(ModeChoice),
     ProfileApplied(Result<(), DaemonError>),
     RunPreflight,
     PreflightFinished(Result<ThermalSafetyStateDto, DaemonError>),
+    BrightnessLoaded(bool, Result<u8, DaemonError>),
+    BrightnessMoved(u8),
+    BrightnessReleased,
+    BrightnessApplied(Result<(), DaemonError>),
 }
 
-pub fn update(message: Message) -> Task<Message> {
+pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
+        Message::BrightnessLoaded(ac, Ok(value)) => {
+            state.ac = ac;
+            state.loaded = true;
+            state.brightness = value;
+            Task::none()
+        }
+        Message::BrightnessLoaded(_, Err(error)) => {
+            Task::done(Message::BrightnessApplied(Err(error)))
+        }
+        Message::BrightnessMoved(value) => {
+            state.brightness = value;
+            Task::none()
+        }
+        Message::BrightnessReleased => {
+            let (ac, value) = (state.ac, state.brightness);
+            Task::perform(
+                daemon::blocking(move || daemon::set_brightness(ac, value)),
+                Message::BrightnessApplied,
+            )
+        }
         Message::ProfileSelected(mode) => Task::perform(
             daemon::blocking(move || {
                 // The quick switcher edits the live power source's profile and
@@ -80,7 +131,9 @@ pub fn update(message: Message) -> Task<Message> {
             Message::PreflightFinished,
         ),
         // main.rs turns these results into status lines; nothing to store here.
-        Message::ProfileApplied(_) | Message::PreflightFinished(_) => Task::none(),
+        Message::ProfileApplied(_)
+        | Message::PreflightFinished(_)
+        | Message::BrightnessApplied(_) => Task::none(),
     }
 }
 
@@ -187,6 +240,7 @@ fn cards<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Vec<Elem
 }
 
 fn status_strip<'a>(
+    state: &'a State,
     snapshot: &'a Snapshot,
     capabilities: &'a Capabilities,
 ) -> Element<'a, Message> {
@@ -207,32 +261,27 @@ fn status_strip<'a>(
     .padding(12)
     .width(Fill);
 
-    let battery: Element<'_, Message> = match &snapshot.battery {
-        Some(info) => {
-            let mut parts =
-                row![text(format!("{}%", info.percent)).color(theme::TEXT_BRIGHT)].spacing(8);
-            if let Some(watts) = info.watts {
-                let color = if watts < 0.0 {
-                    theme::DANGER
-                } else {
-                    theme::ACCENT
-                };
-                parts = parts.push(text(format!("{watts:+.1} W")).color(color));
-            }
-            parts = parts.push(text(if ac { "AC" } else { "Battery" }).color(theme::MUTED));
-            parts.into()
-        }
-        None => text("No battery detected").color(theme::MUTED).into(),
-    };
-    // Matches the taller two-line profile card beside it; the single-line
-    // battery content stays vertically centred via `setting_row`.
-    let battery = container(crate::widgets::setting_row("Battery", "", battery))
-        .style(theme::card)
-        .padding(12)
-        .width(Fill)
-        .height(Fill);
+    let brightness_control = row![
+        slider(0..=100u8, state.brightness, Message::BrightnessMoved)
+            .on_release(Message::BrightnessReleased),
+        text(format!("{}%", state.brightness))
+            .size(12)
+            .color(theme::MUTED)
+            .width(38),
+    ]
+    .spacing(10)
+    .align_y(iced::Center)
+    .width(220);
+    let brightness = container(crate::widgets::setting_row(
+        "Keyboard brightness",
+        "Applies to the current power source",
+        brightness_control.into(),
+    ))
+    .style(theme::card)
+    .padding(12)
+    .width(Fill);
 
-    row![profile, battery].spacing(12).into()
+    row![profile, brightness].spacing(12).into()
 }
 
 fn danger_pane<'a>() -> Element<'a, Message> {
@@ -251,7 +300,11 @@ fn danger_pane<'a>() -> Element<'a, Message> {
     .into()
 }
 
-pub fn view<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Element<'a, Message> {
+pub fn view<'a>(
+    state: &'a State,
+    snapshot: &'a Snapshot,
+    capabilities: &'a Capabilities,
+) -> Element<'a, Message> {
     let mut grid = column![].spacing(12);
     let mut cards = cards(snapshot, capabilities);
     // Two rows of four. The spec's 4-to-2 responsive collapse is deferred:
@@ -265,7 +318,7 @@ pub fn view<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Eleme
         }
         grid = grid.push(r);
     }
-    column![grid, status_strip(snapshot, capabilities), danger_pane()]
+    column![grid, status_strip(state, snapshot, capabilities), danger_pane()]
         .spacing(14)
         .width(Fill)
         .into()
