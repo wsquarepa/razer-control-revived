@@ -831,6 +831,11 @@ pub fn process_client_request(
                     status: d.thermal_status(),
                 })
             }
+            razer_core::DaemonCommand::RunPreflight => {
+                Some(razer_core::DaemonResponse::RunPreflight {
+                    safety_state: device::safety_state_dto(d.preflight()),
+                })
+            }
             razer_core::DaemonCommand::GetDeviceName => {
                 let name = match &d.device {
                     Some(device) => device.get_name(),

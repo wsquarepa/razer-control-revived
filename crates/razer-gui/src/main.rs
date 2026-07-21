@@ -256,26 +256,33 @@ impl App {
                 Task::none()
             }
             Message::Overview(message) => {
-                if let pages::overview::Message::ProfileApplied(result) = &message {
-                    let follow_up = match result {
-                        Ok(()) => {
-                            let ac = telemetry::read_ac_online(std::path::Path::new(
-                                "/sys/class/power_supply",
-                            ))
-                            .unwrap_or(true);
-                            Task::batch([
-                                status_task("Profile applied".to_string()),
-                                pages::performance::load(ac).map(Message::Performance),
-                            ])
-                        }
-                        Err(error) => status_task(format!("Profile change failed: {error}")),
-                    };
-                    return Task::batch([
-                        pages::overview::update(message).map(Message::Overview),
-                        follow_up,
-                    ]);
-                }
-                pages::overview::update(message).map(Message::Overview)
+                let follow_up = match &message {
+                    pages::overview::Message::ProfileApplied(Ok(())) => {
+                        let ac = telemetry::read_ac_online(std::path::Path::new(
+                            "/sys/class/power_supply",
+                        ))
+                        .unwrap_or(true);
+                        Task::batch([
+                            status_task("Profile applied".to_string()),
+                            pages::performance::load(ac).map(Message::Performance),
+                        ])
+                    }
+                    pages::overview::Message::ProfileApplied(Err(error)) => {
+                        status_task(format!("Profile change failed: {error}"))
+                    }
+                    pages::overview::Message::PreflightFinished(Ok(state)) => status_task(format!(
+                        "Preflight finished: thermal safety {}",
+                        razer_core::thermal_safety_label(*state)
+                    )),
+                    pages::overview::Message::PreflightFinished(Err(error)) => {
+                        status_task(format!("Preflight failed: {error}"))
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([
+                    pages::overview::update(message).map(Message::Overview),
+                    follow_up,
+                ])
             }
             Message::Performance(message) => {
                 let Connection::Connected(capabilities) = &self.connection else {

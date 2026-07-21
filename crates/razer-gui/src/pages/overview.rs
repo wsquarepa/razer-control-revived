@@ -3,8 +3,9 @@ use crate::daemon::{self, DaemonError};
 use crate::telemetry::Snapshot;
 use crate::theme;
 use crate::widgets::{Gauge, gauge_card, gauge_fraction};
-use iced::widget::{column, container, pick_list, row, text};
+use iced::widget::{button, column, container, pick_list, row, text};
 use iced::{Element, Fill, Task};
+use razer_core::ThermalSafetyStateDto;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,8 @@ pub fn mode_choices(is_2025: bool, ac: bool) -> Vec<ModeChoice> {
 pub enum Message {
     ProfileSelected(ModeChoice),
     ProfileApplied(Result<(), DaemonError>),
+    RunPreflight,
+    PreflightFinished(Result<ThermalSafetyStateDto, DaemonError>),
 }
 
 pub fn update(message: Message) -> Task<Message> {
@@ -72,8 +75,12 @@ pub fn update(message: Message) -> Task<Message> {
             }),
             Message::ProfileApplied,
         ),
-        // main.rs turns the result into a status line; nothing to store here.
-        Message::ProfileApplied(_) => Task::none(),
+        Message::RunPreflight => Task::perform(
+            daemon::blocking(daemon::run_preflight),
+            Message::PreflightFinished,
+        ),
+        // main.rs turns these results into status lines; nothing to store here.
+        Message::ProfileApplied(_) | Message::PreflightFinished(_) => Task::none(),
     }
 }
 
@@ -225,6 +232,22 @@ fn status_strip<'a>(
     row![profile, battery].spacing(12).into()
 }
 
+fn danger_pane<'a>() -> Element<'a, Message> {
+    container(crate::widgets::setting_row(
+        "Force preflight re-run",
+        "Re-probes the EC and overwrites the thermal-safety posture with the \
+         result; a manual fan target and its monitoring are dropped",
+        button(text("Re-run preflight").size(13))
+            .style(theme::danger_button)
+            .on_press(Message::RunPreflight)
+            .into(),
+    ))
+    .style(theme::danger_card)
+    .padding(12)
+    .width(Fill)
+    .into()
+}
+
 pub fn view<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Element<'a, Message> {
     let mut grid = column![].spacing(12);
     let mut cards = cards(snapshot, capabilities);
@@ -239,7 +262,7 @@ pub fn view<'a>(snapshot: &'a Snapshot, capabilities: &'a Capabilities) -> Eleme
         }
         grid = grid.push(r);
     }
-    column![grid, status_strip(snapshot, capabilities)]
+    column![grid, status_strip(snapshot, capabilities), danger_pane()]
         .spacing(14)
         .width(Fill)
         .into()

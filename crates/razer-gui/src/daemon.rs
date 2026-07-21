@@ -1,4 +1,6 @@
-use razer_core::{CommandResult, DaemonCommand, DaemonResponse, GpuInfo, ThermalStatus};
+use razer_core::{
+    CommandResult, DaemonCommand, DaemonResponse, GpuInfo, ThermalSafetyStateDto, ThermalStatus,
+};
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::Shutdown;
@@ -116,6 +118,7 @@ expect_variant!(
 expect_variant!(expect_set_dgpu_pm, SetDgpuRuntimePM { result } => bool);
 expect_variant!(expect_set_gpu_mode, SetGpuMode { result, message } => (bool, String));
 expect_variant!(expect_cpu_energy, GetCpuEnergy { microjoules } => Option<u64>);
+expect_variant!(expect_run_preflight, RunPreflight { safety_state } => ThermalSafetyStateDto);
 
 fn ac_wire(ac: bool) -> usize {
     if ac { 1 } else { 0 }
@@ -252,6 +255,10 @@ pub fn cpu_energy() -> Result<Option<u64>, DaemonError> {
     expect_cpu_energy(request(&DaemonCommand::GetCpuEnergy)?)
 }
 
+pub fn run_preflight() -> Result<ThermalSafetyStateDto, DaemonError> {
+    expect_run_preflight(request(&DaemonCommand::RunPreflight)?)
+}
+
 pub fn set_gpu_mode(mode: &str) -> Result<String, DaemonError> {
     let (ok, message) = expect_set_gpu_mode(request(&DaemonCommand::SetGpuMode {
         mode: mode.to_string(),
@@ -370,6 +377,7 @@ mod tests {
                 mode: "hybrid".to_string(),
             },
             DaemonCommand::GetCpuEnergy,
+            DaemonCommand::RunPreflight,
         ];
         for command in commands {
             let bytes = bincode::serialize(&command).expect("serialize");

@@ -33,6 +33,9 @@ enum Args {
         #[command(subcommand)]
         effect: Effect,
     },
+    /// Force the daemon to re-run its thermal-safety preflight sweep,
+    /// overwriting the current safety posture with the result
+    Preflight,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -415,6 +418,20 @@ fn main() {
                 send_standard_effect("wave".to_string(), vec![params.direction])
             }
         },
+        Args::Preflight => run_preflight(),
+    }
+}
+
+fn run_preflight() {
+    match send_data(razer_core::DaemonCommand::RunPreflight) {
+        Some(razer_core::DaemonResponse::RunPreflight { safety_state }) => {
+            println!(
+                "Thermal safety: {}",
+                razer_core::thermal_safety_label(safety_state)
+            );
+        }
+        Some(_) => eprintln!("Daemon responded with invalid data!"),
+        None => eprintln!("Unknown daemon error!"),
     }
 }
 
@@ -597,12 +614,7 @@ fn read_actual_fan_rpm() {
 }
 
 fn print_thermal_status(status: &razer_core::ThermalStatus) {
-    let safety: &str = match status.safety_state {
-        razer_core::ThermalSafetyStateDto::Preflight => "Preflight",
-        razer_core::ThermalSafetyStateDto::Ready => "Ready",
-        razer_core::ThermalSafetyStateDto::Manual => "Manual",
-        razer_core::ThermalSafetyStateDto::Disabled => "Disabled",
-    };
+    let safety: &str = razer_core::thermal_safety_label(status.safety_state);
     let fan_mode: &str = match status.fan_mode {
         razer_core::FanControlModeDto::Automatic => "Automatic",
         razer_core::FanControlModeDto::Fixed => "Fixed",

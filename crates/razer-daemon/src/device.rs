@@ -305,7 +305,7 @@ fn thermal_failure_dto(error: &ThermalError) -> razer_core::ThermalFailureDto {
 
 /// Project the daemon's internal safety posture onto the frontend DTO, dropping
 /// the target RPM and failure counter a frontend does not consume.
-fn safety_state_dto(state: thermal::ThermalSafetyState) -> razer_core::ThermalSafetyStateDto {
+pub fn safety_state_dto(state: thermal::ThermalSafetyState) -> razer_core::ThermalSafetyStateDto {
     match state {
         thermal::ThermalSafetyState::Preflight => razer_core::ThermalSafetyStateDto::Preflight,
         thermal::ThermalSafetyState::Ready => razer_core::ThermalSafetyStateDto::Ready,

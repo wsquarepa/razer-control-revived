@@ -58,6 +58,17 @@ pub enum ThermalSafetyStateDto {
     Disabled,
 }
 
+/// Frontend display label for a thermal-safety posture.
+#[allow(dead_code)]
+pub fn thermal_safety_label(state: ThermalSafetyStateDto) -> &'static str {
+    match state {
+        ThermalSafetyStateDto::Preflight => "Preflight",
+        ThermalSafetyStateDto::Ready => "Ready",
+        ThermalSafetyStateDto::Manual => "Manual",
+        ThermalSafetyStateDto::Disabled => "Disabled",
+    }
+}
+
 /// Whether the fans run under firmware-automatic control or a fixed manual speed.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FanControlModeDto {
@@ -206,12 +217,17 @@ pub enum DaemonCommand {
     /// Reads the raw CPU package energy counter (RAPL powercap) so the daemon
     /// (root) can serve it to unprivileged clients whose kernel restricts
     /// `energy_uj` to root (the PLATYPUS side-channel mitigation).
+    GetCpuEnergy,
+    /// Force a re-run of the getter-only thermal preflight sweep and overwrite
+    /// the live safety posture with its outcome. Recovers a daemon latched
+    /// Disabled by a transient EC failure at startup; a Manual posture (and its
+    /// tachometer monitoring) is dropped in the process.
     ///
     /// APPEND-ONLY: this must stay the last `DaemonCommand` variant. bincode
     /// encodes enum variants by positional index, so inserting a variant
     /// anywhere else would silently reorder every variant after it and break
     /// wire compatibility with already-installed clients and daemons.
-    GetCpuEnergy,
+    RunPreflight,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -299,11 +315,16 @@ pub enum DaemonResponse {
     },
     /// Answers `DaemonCommand::GetCpuEnergy`. `microjoules` is `None` when the
     /// machine exposes no readable RAPL package counter.
-    ///
-    /// APPEND-ONLY: this must stay the last `DaemonResponse` variant, for the
-    /// same bincode positional-encoding reason as `DaemonCommand::GetCpuEnergy`.
     GetCpuEnergy {
         microjoules: Option<u64>,
+    },
+    /// Answers `DaemonCommand::RunPreflight` with the safety posture the sweep
+    /// produced: Ready on a pass, Disabled on a failure.
+    ///
+    /// APPEND-ONLY: this must stay the last `DaemonResponse` variant, for the
+    /// same bincode positional-encoding reason as `DaemonCommand::RunPreflight`.
+    RunPreflight {
+        safety_state: ThermalSafetyStateDto,
     },
 }
 
@@ -544,6 +565,43 @@ mod tests {
             decoded,
             DaemonResponse::GetCpuEnergy { microjoules: None }
         ));
+    }
+
+    #[test]
+    fn run_preflight_command_round_trips() {
+        let decoded = round_trip(&DaemonCommand::RunPreflight);
+        assert!(matches!(decoded, DaemonCommand::RunPreflight));
+    }
+
+    #[test]
+    fn run_preflight_response_round_trips_for_both_outcomes() {
+        for safety_state in [
+            ThermalSafetyStateDto::Ready,
+            ThermalSafetyStateDto::Disabled,
+        ] {
+            let response = DaemonResponse::RunPreflight { safety_state };
+            let decoded = round_trip(&response);
+            assert!(
+                matches!(decoded, DaemonResponse::RunPreflight { safety_state: s } if s == safety_state)
+            );
+        }
+    }
+
+    #[test]
+    fn labels_every_safety_posture() {
+        assert_eq!(
+            thermal_safety_label(ThermalSafetyStateDto::Preflight),
+            "Preflight"
+        );
+        assert_eq!(thermal_safety_label(ThermalSafetyStateDto::Ready), "Ready");
+        assert_eq!(
+            thermal_safety_label(ThermalSafetyStateDto::Manual),
+            "Manual"
+        );
+        assert_eq!(
+            thermal_safety_label(ThermalSafetyStateDto::Disabled),
+            "Disabled"
+        );
     }
 
     #[test]

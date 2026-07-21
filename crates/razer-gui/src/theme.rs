@@ -45,6 +45,37 @@ pub fn card(_theme: &Theme) -> container::Style {
     }
 }
 
+/// Red-bordered card for destructive controls (the Overview danger pane).
+pub fn danger_card(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color { a: 0.06, ..DANGER })),
+        border: Border {
+            color: DANGER,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        text_color: Some(TEXT),
+        ..container::Style::default()
+    }
+}
+
+pub fn danger_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => Color { a: 0.30, ..DANGER },
+        _ => Color { a: 0.15, ..DANGER },
+    };
+    button::Style {
+        background: Some(Background::Color(background)),
+        text_color: DANGER,
+        border: Border {
+            color: DANGER,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
 pub fn sidebar(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(SIDEBAR)),
