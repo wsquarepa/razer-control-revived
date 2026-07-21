@@ -224,10 +224,13 @@ fn status_strip<'a>(
         }
         None => text("No battery detected").color(theme::MUTED).into(),
     };
+    // Matches the taller two-line profile card beside it; the single-line
+    // battery content stays vertically centred via `setting_row`.
     let battery = container(crate::widgets::setting_row("Battery", "", battery))
         .style(theme::card)
         .padding(12)
-        .width(Fill);
+        .width(Fill)
+        .height(Fill);
 
     row![profile, battery].spacing(12).into()
 }
